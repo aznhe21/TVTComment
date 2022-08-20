@@ -1,9 +1,15 @@
-#pragma once
+ï»¿#pragma once
 
-#include "OsdCompositor.h"
 #include "Util.h"
+#include "OsdCompositor.h"
+#include <atomic>
+#include <thread>
 
-#pragma warning(disable : 4995)
+namespace Gdiplus
+{
+	class Bitmap;
+	class Graphics;
+}
 
 class CCommentWindow
 {
@@ -11,12 +17,11 @@ public:
 	static const int DEFAULT_LINE_COUNT = 14;
 	static const int DEFAULT_LINE_DRAW_COUNT = 9999;
 	static const int DISPLAY_DURATION = 4000;
-	static const int CHAT_TEXT_MAX = 256;
-	// •\¦‚·‚×‚«ƒRƒƒ“ƒg‚ª‚È‚¢‚Æ‚«ƒEƒBƒ“ƒhƒE‚ğ”ñ•\¦‚É‚·‚é‚Ü‚Å‚Ì—P—\[•b]
-	// (ƒŒƒCƒ„[ƒhƒEƒBƒ“ƒhƒE‚Í”í‚¹‚Ä‚¢‚é‚¾‚¯‚Å‚à‚»‚ê‚È‚è‚ÌƒRƒXƒg‚ª‚©‚©‚é‚½‚ß)
+	// è¡¨ç¤ºã™ã¹ãã‚³ãƒ¡ãƒ³ãƒˆãŒãªã„ã¨ãã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ã‚’éè¡¨ç¤ºã«ã™ã‚‹ã¾ã§ã®çŒ¶äºˆ[ç§’]
+	// (ãƒ¬ã‚¤ãƒ¤ãƒ¼ãƒ‰ã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ã¯è¢«ã›ã¦ã„ã‚‹ã ã‘ã§ã‚‚ãã‚Œãªã‚Šã®ã‚³ã‚¹ãƒˆãŒã‹ã‹ã‚‹ãŸã‚)
 	static const int AUTOHIDE_DELAY = 10;
 	static const int FONT_SMALL_RATIO = 75;
-	// ƒeƒNƒXƒ`ƒƒ—pƒrƒbƒgƒ}ƒbƒv‚Ì•‚ÌÅ¬’l(ƒƒ‚ƒŠ‚â‹ÇŠQÆ«‚Ì–Ê‚Å\•ª¬‚³‚È’l)
+	// ãƒ†ã‚¯ã‚¹ãƒãƒ£ç”¨ãƒ“ãƒƒãƒˆãƒãƒƒãƒ—ã®å¹…ã®æœ€å°å€¤(ãƒ¡ãƒ¢ãƒªã‚„å±€æ‰€å‚ç…§æ€§ã®é¢ã§ååˆ†å°ã•ãªå€¤)
 	static const int TEXTURE_BITMAP_WIDTH_MIN = 640;
 	enum CHAT_POSITION {
 		CHAT_POS_DEFAULT,
@@ -32,13 +37,13 @@ public:
 		CHAT_ALIGN_LEFT,
 		CHAT_ALIGN_RIGHT,
 	};
-	bool Initialize(HINSTANCE hinst, bool *pbEnableOsdCompositor);
+	bool Initialize(HINSTANCE hinst, bool *pbEnableOsdCompositor, bool bSetHookOsdCompositor);
 	void Finalize();
 	CCommentWindow();
 	~CCommentWindow();
 	bool Create(HWND hwndParent);
 	void Destroy();
-	void SetStyle(LPCTSTR fontName, LPCTSTR fontNameMulti, bool bBold, bool bAntiAlias,
+	void SetStyle(LPCTSTR fontName, LPCTSTR fontNameMulti, LPCTSTR fontNameEmoji, bool bBold, bool bAntiAlias,
 	              int fontOutline, bool bUseOsdCompositor, bool bUseTexture, bool bUseDrawingThread);
 	void SetCommentSize(int size, int sizeMin, int sizeMax, int lineMargin);
 	void SetDrawLineCount(int lineDrawCount);
@@ -55,13 +60,18 @@ public:
 	void ClearChat();
 	void Forward(int duration);
 	void Update();
-	bool IsCreated() const { return hwnd_ != NULL; }
+	bool IsCreated() const { return hwnd_ != nullptr; }
+	void OnFilterGraphInitialized(IGraphBuilder *pGraphBuilder) { osdCompositor_.OnFilterGraphInitialized(pGraphBuilder); }
+	void OnFilterGraphFinalize(IGraphBuilder *pGraphBuilder) { osdCompositor_.OnFilterGraphFinalize(pGraphBuilder); }
 private:
 	struct CHAT {
 		DWORD pts;
 		DWORD count;
 		int line;
-		Gdiplus::ARGB color;
+		BYTE colorB;
+		BYTE colorG;
+		BYTE colorR;
+		BYTE colorA;
 		CHAT_POSITION position;
 		bool bSmall;
 		BYTE alignFactor;
@@ -70,21 +80,30 @@ private:
 		bool bDrew;
 		int currentDrawWidth;
 		int currentDrawHeight;
-		TCHAR text[CHAT_TEXT_MAX];
-		CHAT() {}
+		tstring text;
 	};
 	struct TEXTURE {
 		bool bUsed;
 		bool bSmall;
 		RECT rc;
-		Gdiplus::ARGB color;
-		TCHAR text[CHAT_TEXT_MAX];
-		TEXTURE() {}
-		bool IsMatch(const CHAT &c) const { return c.color == color && c.bSmall == bSmall && !lstrcmp(c.text, text); }
+		BYTE colorB;
+		BYTE colorG;
+		BYTE colorR;
+		BYTE colorA;
+		tstring text;
+		bool IsMatch(const CHAT &c) const {
+			return c.colorB == colorB &&
+			       c.colorG == colorG &&
+			       c.colorR == colorR &&
+			       c.colorA == colorA &&
+			       c.bSmall == bSmall &&
+			       c.text == text;
+		}
 	};
 	bool AllocateWorkBitmap(int width, int height, bool *pbRealloc);
+	bool IsParentSized();
 	void UpdateLayeredWindow();
-	static unsigned int __stdcall DrawingThread(void *pParam);
+	void DrawingThread();
 	bool WaitForIdleDrawingThread();
 	void UpdateChat();
 	BOOL UpdateLayeredWindow(HWND hWnd, HDC hdcDst, POINT *pptDst, SIZE *psize, HDC hdcSrc, POINT *pptSrc,
@@ -95,19 +114,17 @@ private:
 
 	HINSTANCE hinst_;
 	ULONG_PTR gdiplusToken_;
-	HMODULE hUser32_;
 	BOOL (WINAPI *pfnUpdateLayeredWindowIndirect_)(HWND hWnd, const UPDATELAYEREDWINDOWINFO *pULWInfo);
-	bool bWindows8_;
 	bool bSse2Available_;
 	HWND hwnd_;
 	HWND hwndParent_;
 	HBITMAP hbmWork_;
 	void *pBits_;
 	HDC hdcWork_;
-	HANDLE hDrawingThread_;
+	std::thread drawingThread_;
 	HANDLE hDrawingEvent_;
 	HANDLE hDrawingIdleEvent_;
-	volatile bool bQuitDrawingThread_;
+	std::atomic_bool bQuitDrawingThread_;
 	int commentSizeMin_;
 	int commentSizeMax_;
 	int lineCount_;
@@ -116,6 +133,7 @@ private:
 	double fontSmallScale_;
 	TCHAR fontName_[LF_FACESIZE];
 	TCHAR fontNameMulti_[LF_FACESIZE];
+	TCHAR fontNameEmoji_[LF_FACESIZE];
 	int fontStyle_;
 	bool bAntiAlias_;
 	BYTE opacity_;
@@ -126,9 +144,12 @@ private:
 	int currentWindowWidth_;
 	std::list<CHAT> chatList_;
 	std::list<CHAT> chatPoolList_;
-	// chatList_(ƒŠƒXƒg\‘¢‚Ì‚İ),chatPoolList_‚ğ•ÛŒì
-	CCriticalLock chatLock_;
+	// chatList_(ãƒªã‚¹ãƒˆæ§‹é€ ã®ã¿),chatPoolList_ã‚’ä¿è­·
+	recursive_mutex_ chatLock_;
 	int autoHideCount_;
+	int parentSizedCount_;
+	RECT rcParent_;
+	RECT rcOsdSurface_;
 	COsdCompositor osdCompositor_;
 	bool bUseOsd_;
 	bool bShowOsd_;

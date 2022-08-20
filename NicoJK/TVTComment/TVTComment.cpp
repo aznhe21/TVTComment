@@ -172,7 +172,7 @@ namespace TVTComment
 	{
 		FILETIME ft;
 		::SystemTimeToFileTime(&time, &ft);
-		return ::FileTimeToUnixTime(ft);
+		return ::FileTimeToUnixTime(::FileTimeToLongLong(ft));
 	}
 
 	bool TVTComment::IsConnected() const
@@ -189,7 +189,7 @@ namespace TVTComment
 	{
 		switch (uMsg)
 		{
-		case WM_INITDIALOG:
+		case WM_CREATE:
 			this->dialog = hwnd;
 
 			this->asyncTask = concurrency::task<void>([this]

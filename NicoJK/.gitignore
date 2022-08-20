@@ -1,0 +1,16 @@
+*
+!*/
+!*.bmp
+!*.c
+!*.cpp
+!*.def
+!*.h
+!*.ini
+!*.rc
+!*.sln
+!*.txt
+!*.vcxproj
+!*.vcxproj.filters
+!.gitignore
+!README
+*.FileListAbsolute.txt

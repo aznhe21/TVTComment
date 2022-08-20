@@ -1,21 +1,27 @@
-#include "stdafx.h"
+ï»¿#include "stdafx.h"
 #include "Util.h"
 #include "CommentWindow.h"
+#include <functional>
 #include <emmintrin.h>
+#include <gdiplus.h>
+
+#pragma comment(lib, "gdiplus.lib")
 
 #ifndef ASSERT
 #include <cassert>
 #define ASSERT assert
 #endif
 
-#if 0 // ƒAƒZƒ“ƒuƒŠŒŸõ—p
+namespace
+{
+#if 0 // ã‚¢ã‚»ãƒ³ãƒ–ãƒªæ¤œç´¢ç”¨
 #define MAGIC_NUMBER(x) { g_dwMagic=(x); }
-static DWORD g_dwMagic;
+DWORD g_dwMagic;
 #else
 #define MAGIC_NUMBER
 #endif
 
-static void ApplyOpacityPlain(DWORD *pBits, int range, BYTE opacityA, BYTE opacityRGB)
+void ApplyOpacityPlain(DWORD *pBits, int range, BYTE opacityA, BYTE opacityRGB)
 {
 	MAGIC_NUMBER(0x12452356);
 	for (int i = 0; i < range; ++i) {
@@ -24,12 +30,12 @@ static void ApplyOpacityPlain(DWORD *pBits, int range, BYTE opacityA, BYTE opaci
 	}
 }
 
-static void ApplyOpacitySse2(DWORD *pBits, int range, BYTE opacityA, BYTE opacityRGB)
+void ApplyOpacitySse2(DWORD *pBits, int range, BYTE opacityA, BYTE opacityRGB)
 {
 	int top = 3 - reinterpret_cast<ULONG_PTR>(pBits + 3) / sizeof(DWORD) % 4;
 	ApplyOpacityPlain(pBits, min(top, range), opacityA, opacityRGB);
 
-	// ApplyOpacityPlain()‚É‘Î‚µ‚Ä’P‘Ì‚ÅÀ‘ª6.8”{‘¬‚¢
+	// ApplyOpacityPlain()ã«å¯¾ã—ã¦å˜ä½“ã§å®Ÿæ¸¬6.8å€é€Ÿã„
 	MAGIC_NUMBER(0x13243546);
 	__m128i *pAligned = reinterpret_cast<__m128i*>(pBits + top);
 	int bottom = (range - top) / 4;
@@ -46,7 +52,7 @@ static void ApplyOpacitySse2(DWORD *pBits, int range, BYTE opacityA, BYTE opacit
 	}
 }
 
-static void ApplyOpacity(DWORD *pBits, int range, BYTE opacityA, BYTE opacityRGB, bool bUseSse2)
+void ApplyOpacity(DWORD *pBits, int range, BYTE opacityA, BYTE opacityRGB, bool bUseSse2)
 {
 	if (bUseSse2) {
 		ApplyOpacitySse2(pBits, range, opacityA, opacityRGB);
@@ -55,10 +61,121 @@ static void ApplyOpacity(DWORD *pBits, int range, BYTE opacityA, BYTE opacityRGB
 	}
 }
 
-bool CCommentWindow::Initialize(HINSTANCE hinst, bool *pbEnableOsdCompositor)
+extern const int EMOJI_RANGE_TABLE[100];
+
+bool MeasureString(Gdiplus::Graphics &g, const tstring &text, const Gdiplus::Font &font, const Gdiplus::Font &fontEmoji,
+                   Gdiplus::REAL lineHeight, Gdiplus::PointF origin, Gdiplus::RectF *boundingBox = nullptr,
+                   const std::function<void(LPCTSTR, int, const Gdiplus::Font &, const Gdiplus::PointF &)> &func = nullptr)
+{
+	Gdiplus::RectF bb(0, 0, 0, 0);
+	bool bOk = false;
+	if (&font == &fontEmoji) {
+		// ãã®ã¾ã¾è¨ˆæ¸¬
+		if (!boundingBox || g.MeasureString(text.c_str(), static_cast<int>(text.size()), &font, origin, &bb) == Gdiplus::Ok) {
+			bOk = true;
+			if (func) {
+				func(text.c_str(), static_cast<int>(text.size()), font, origin);
+			}
+		}
+		if (boundingBox) {
+			*boundingBox = bb;
+		}
+		return bOk;
+	}
+
+	// çµµæ–‡å­—ã¨ãã®ä»–ã®ãƒ•ã‚©ãƒ³ãƒˆã‚’åˆ‡ã‚Šæ›¿ãˆãªãŒã‚‰è¨ˆæ¸¬
+	auto it = text.begin();
+	auto itEnd = text.end();
+	auto itFrom = text.begin();
+	auto itTo = text.begin();
+	int hi = 0;
+	const int *pEnd = EMOJI_RANGE_TABLE + _countof(EMOJI_RANGE_TABLE);
+	const Gdiplus::Font *pFont = nullptr;
+	Gdiplus::PointF initialOrigin = origin;
+
+	for (;;) {
+		// çµ‚ç«¯ã«å¿…ãšæ”¹è¡ŒãŒã‚ã‚‹ã‹ã®ã‚ˆã†ã«å‡¦ç†ã™ã‚‹
+		int c = it == itEnd ? L'\n' : *it;
+		if (0xD800 <= c && c <= 0xDBFF) {
+			// Highã‚µãƒ­ã‚²ãƒ¼ãƒˆ
+			hi = c;
+			++it;
+			continue;
+		}
+		if (hi != 0 && 0xDC00 <= c && c <= 0xDFFF) {
+			// Highã‚µãƒ­ã‚²ãƒ¼ãƒˆã«ã¤ã¥ãLowã‚µãƒ­ã‚²ãƒ¼ãƒˆ
+			c = ((hi - 0xD800) << 10) + c + 0x2400;
+		}
+		hi = 0;
+
+		const Gdiplus::Font *pSwitchFont = nullptr;
+		const int *pBound = std::upper_bound(EMOJI_RANGE_TABLE, pEnd, c);
+		if (pBound != pEnd && ((pBound - EMOJI_RANGE_TABLE) & 1)) {
+			// çµµæ–‡å­—ã‹ç‰¹å®šã®ç•°ä½“å­—ã‚»ãƒ¬ã‚¯ã‚¿
+			if (pFont != &fontEmoji && c != 0xFE0E && c != 0xFE0F) {
+				// çµµæ–‡å­—ã®ãƒ•ã‚©ãƒ³ãƒˆã«åˆ‡ã‚Šæ›¿ãˆ
+				pSwitchFont = &fontEmoji;
+			}
+		} else {
+			if (pFont != &font) {
+				// ãã®ä»–ã®ãƒ•ã‚©ãƒ³ãƒˆã«åˆ‡ã‚Šæ›¿ãˆ
+				pSwitchFont = &font;
+			}
+		}
+
+		// ãƒ•ã‚©ãƒ³ãƒˆãŒåˆ‡ã‚Šæ›¿ã‚ã£ãŸã‹æ”¹è¡Œã‹çµ‚ç«¯
+		if (pSwitchFont || c == L'\n') {
+			if (!pFont && c == L'\n') {
+				// ãŠã‚‚ã«ç©ºè¡Œ
+				pFont = pSwitchFont ? pSwitchFont : &font;
+			}
+			if (pFont) {
+				Gdiplus::RectF tmpbb;
+				if (itTo == itFrom) {
+					if (c == L'\n') {
+						// æ”¹è¡Œã®ã¿
+						origin.X = initialOrigin.X;
+						origin.Y += lineHeight;
+					}
+				} else if (g.MeasureString(&*itFrom, static_cast<int>(itTo - itFrom), pFont, origin, &tmpbb) == Gdiplus::Ok) {
+					bOk = true;
+					if (func) {
+						func(&*itFrom, static_cast<int>(itTo - itFrom), *pFont, origin);
+					}
+					origin.X += tmpbb.Width;
+					bb.Width = max(bb.Width, origin.X - initialOrigin.X);
+					bb.Height = max(bb.Height, origin.Y + tmpbb.Height - initialOrigin.Y);
+					if (c == L'\n') {
+						origin.X = initialOrigin.X;
+						origin.Y += lineHeight;
+					}
+				}
+			}
+			if (it == itEnd) {
+				break;
+			} else if (c == L'\n') {
+				// æ¬¡ã®æ–‡å­—ã‹ã‚‰é–‹å§‹ã€‚ãƒ•ã‚©ãƒ³ãƒˆæœªå®š
+				itFrom = it + 1;
+				pFont = nullptr;
+			} else {
+				// ã“ã®æ–‡å­—ã‹ã‚‰é–‹å§‹
+				itFrom = itTo;
+				pFont = pSwitchFont;
+			}
+		}
+		itTo = ++it;
+	}
+	if (boundingBox) {
+		*boundingBox = bb;
+	}
+	return bOk;
+}
+}
+
+bool CCommentWindow::Initialize(HINSTANCE hinst, bool *pbEnableOsdCompositor, bool bSetHookOsdCompositor)
 {
 	if (!hinst_) {
-		WNDCLASSEX wc = {0};
+		WNDCLASSEX wc = {};
 		wc.cbSize = sizeof(WNDCLASSEX);
 		wc.lpfnWndProc = WndProc;
 		wc.hInstance = hinst;
@@ -66,29 +183,27 @@ bool CCommentWindow::Initialize(HINSTANCE hinst, bool *pbEnableOsdCompositor)
 		if (RegisterClassEx(&wc) == 0) {
 			return false;
 		}
-		// TVTest–{‘Ì‚àGdiplus‚ğg‚Á‚Ä‚¢‚é‚Ì‚Å’x‰„ƒ[ƒh‚Í‚µ‚È‚¢
+		// TVTestæœ¬ä½“ã‚‚Gdiplusã‚’ä½¿ã£ã¦ã„ã‚‹ã®ã§é…å»¶ãƒ­ãƒ¼ãƒ‰ã¯ã—ãªã„
 		Gdiplus::GdiplusStartupInput si;
-		if (Gdiplus::GdiplusStartup(&gdiplusToken_, &si, NULL) != Gdiplus::Ok) {
+		if (Gdiplus::GdiplusStartup(&gdiplusToken_, &si, nullptr) != Gdiplus::Ok) {
 			return false;
 		}
 		hinst_ = hinst;
 
 		if (pbEnableOsdCompositor && *pbEnableOsdCompositor) {
-			// ‹[—‚Å‚È‚¢OSD‚ğ—LŒø‚É‚·‚é
-			// ÀÛ‚Ég‚¤‚©‚Ç‚¤‚©‚ÍSetStyle()‚ÅŒˆ‚ß‚é
-			*pbEnableOsdCompositor = osdCompositor_.Initialize();
+			// æ“¬ä¼¼ã§ãªã„OSDã‚’æœ‰åŠ¹ã«ã™ã‚‹
+			// å®Ÿéš›ã«ä½¿ã†ã‹ã©ã†ã‹ã¯SetStyle()ã§æ±ºã‚ã‚‹
+			*pbEnableOsdCompositor = osdCompositor_.Initialize(bSetHookOsdCompositor);
 			osdCompositor_.SetUpdateCallback(UpdateCallback, this);
 		}
 
-		OSVERSIONINFO vi;
+		OSVERSIONINFOEX vi;
 		vi.dwOSVersionInfoSize = sizeof(vi);
-		bWindows8_ = false;
-		if (GetVersionEx(&vi)) {
-			bWindows8_ = vi.dwMajorVersion==6 && vi.dwMinorVersion==2;
-			if (vi.dwMajorVersion >= 6 && (hUser32_ = LoadLibrary(TEXT("user32.dll"))) != NULL) {
-				// ‚±‚ÌAPI‚ÍVistaˆÈ~‚É‘¶İ‚·‚é‚ªVista‚ÌÀ‘•‚ÍƒoƒO‚ğŠÜ‚Ş‚ç‚µ‚¢(KB955688)‚Ì‚Å’ˆÓ
-				(void*&)pfnUpdateLayeredWindowIndirect_ = GetProcAddress(hUser32_, "UpdateLayeredWindowIndirect");
-			}
+		vi.dwMajorVersion = 6;
+		if (VerifyVersionInfo(&vi, VER_MAJORVERSION, VerSetConditionMask(0, VER_MAJORVERSION, VER_GREATER_EQUAL))) {
+			// ã“ã®APIã¯Vistaä»¥é™ã«å­˜åœ¨ã™ã‚‹ãŒVistaã®å®Ÿè£…ã¯ãƒã‚°ã‚’å«ã‚€ã‚‰ã—ã„(KB955688)ã®ã§æ³¨æ„
+			pfnUpdateLayeredWindowIndirect_ = reinterpret_cast<BOOL (WINAPI*)(HWND, const UPDATELAYEREDWINDOWINFO*)>(
+				GetProcAddress(GetModuleHandle(TEXT("user32.dll")), "UpdateLayeredWindowIndirect"));
 		}
 		bSse2Available_ = IsProcessorFeaturePresent(PF_XMMI64_INSTRUCTIONS_AVAILABLE) != FALSE;
 	}
@@ -97,34 +212,27 @@ bool CCommentWindow::Initialize(HINSTANCE hinst, bool *pbEnableOsdCompositor)
 
 void CCommentWindow::Finalize()
 {
-	pfnUpdateLayeredWindowIndirect_ = NULL;
-	if (hUser32_) {
-		FreeLibrary(hUser32_);
-		hUser32_ = NULL;
-	}
+	pfnUpdateLayeredWindowIndirect_ = nullptr;
 	if (hinst_) {
         osdCompositor_.Uninitialize();
 		Gdiplus::GdiplusShutdown(gdiplusToken_);
 		UnregisterClass(TEXT("ru.jk.comment"), hinst_);
-		hinst_ = NULL;
+		hinst_ = nullptr;
 	}
 }
 
 CCommentWindow::CCommentWindow()
-	: hinst_(NULL)
+	: hinst_(nullptr)
 	, gdiplusToken_(0)
-	, hUser32_(NULL)
-	, pfnUpdateLayeredWindowIndirect_(NULL)
-	, bWindows8_(false)
+	, pfnUpdateLayeredWindowIndirect_(nullptr)
 	, bSse2Available_(false)
-	, hwnd_(NULL)
-	, hwndParent_(NULL)
-	, hbmWork_(NULL)
-	, pBits_(NULL)
-	, hdcWork_(NULL)
-	, hDrawingThread_(NULL)
-	, hDrawingEvent_(NULL)
-	, hDrawingIdleEvent_(NULL)
+	, hwnd_(nullptr)
+	, hwndParent_(nullptr)
+	, hbmWork_(nullptr)
+	, pBits_(nullptr)
+	, hdcWork_(nullptr)
+	, hDrawingEvent_(nullptr)
+	, hDrawingIdleEvent_(nullptr)
 	, bQuitDrawingThread_(false)
 	, commentSizeMin_(1)
 	, commentSizeMax_(INT_MAX)
@@ -141,18 +249,23 @@ CCommentWindow::CCommentWindow()
 	, chatCount_(0)
 	, currentWindowWidth_(-1)
 	, autoHideCount_(0)
+	, parentSizedCount_(0)
 	, bUseOsd_(false)
 	, bShowOsd_(false)
 	, bUseTexture_(false)
 	, bUseDrawingThread_(false)
-	, pTextureBitmap_(NULL)
-	, pgTexture_(NULL)
+	, pTextureBitmap_(nullptr)
+	, pgTexture_(nullptr)
 	, currentTextureHeight_(0)
 	, bForceRefreshDirty_(false)
 	, debugFlags_(0)
 {
 	fontName_[0] = TEXT('\0');
 	fontNameMulti_[0] = TEXT('\0');
+	fontNameEmoji_[0] = TEXT('\0');
+	RECT rcZero = {};
+	rcParent_ = rcZero;
+	rcOsdSurface_ = rcZero;
 }
 
 CCommentWindow::~CCommentWindow()
@@ -167,20 +280,18 @@ bool CCommentWindow::Create(HWND hwndParent)
 		return true;
 	}
 	if (hinst_ && hwndParent) {
-		// ÀÛ‚É‚ÍeƒEƒBƒ“ƒhƒE‚Å‚Í‚È‚¢
+		// å®Ÿéš›ã«ã¯è¦ªã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ã§ã¯ãªã„
 		hwndParent_ = hwndParent;
 		CreateWindowEx(WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_NOACTIVATE,
-		               TEXT("ru.jk.comment"), NULL, WS_POPUP, 0, 0, 0, 0, hwndParent_, NULL, hinst_, this);
+		               TEXT("ru.jk.comment"), nullptr, WS_POPUP, 0, 0, 0, 0, hwndParent_, nullptr, hinst_, this);
 		if (hwnd_) {
 			if (!bUseOsd_ && bUseDrawingThread_) {
-				hDrawingEvent_ = CreateEvent(NULL, FALSE, FALSE, NULL);
-				hDrawingIdleEvent_ = CreateEvent(NULL, TRUE, TRUE, NULL);
+				hDrawingEvent_ = CreateEvent(nullptr, FALSE, FALSE, nullptr);
+				hDrawingIdleEvent_ = CreateEvent(nullptr, TRUE, TRUE, nullptr);
 				if (hDrawingEvent_ && hDrawingIdleEvent_) {
 					bQuitDrawingThread_ = false;
-					hDrawingThread_ = reinterpret_cast<HANDLE>(::_beginthreadex(NULL, 0, DrawingThread, this, 0, NULL));
-					if (hDrawingThread_) {
-						SetThreadPriority(hDrawingThread_, THREAD_PRIORITY_ABOVE_NORMAL);
-					}
+					drawingThread_ = std::thread([this](){ DrawingThread(); });
+					SetThreadPriority(drawingThread_.native_handle(), THREAD_PRIORITY_ABOVE_NORMAL);
 				}
 			}
 			osdCompositor_.SetContainerWindow(hwndParent_);
@@ -196,33 +307,29 @@ bool CCommentWindow::Create(HWND hwndParent)
 
 void CCommentWindow::Destroy()
 {
-	if (hDrawingThread_) {
+	if (drawingThread_.joinable()) {
 		bQuitDrawingThread_ = true;
 		SetEvent(hDrawingEvent_);
-		if (WaitForSingleObject(hDrawingThread_, 30000) == WAIT_TIMEOUT) {
-			TerminateThread(hDrawingThread_, 1);
-		}
-		CloseHandle(hDrawingThread_);
-		hDrawingThread_ = NULL;
+		drawingThread_.join();
 	}
 	if (hDrawingIdleEvent_) {
 		CloseHandle(hDrawingIdleEvent_);
-		hDrawingIdleEvent_ = NULL;
+		hDrawingIdleEvent_ = nullptr;
 	}
 	if (hDrawingEvent_) {
 		CloseHandle(hDrawingEvent_);
-		hDrawingEvent_ = NULL;
+		hDrawingEvent_ = nullptr;
 	}
 	if (hwnd_) {
 		DestroyWindow(hwnd_);
 	}
 	if (hbmWork_) {
 		DeleteObject(hbmWork_);
-		hbmWork_ = NULL;
+		hbmWork_ = nullptr;
 	}
 	if (hdcWork_) {
 		DeleteDC(hdcWork_);
-		hdcWork_ = NULL;
+		hdcWork_ = nullptr;
 	}
 	if (bShowOsd_) {
 		osdCompositor_.DeleteTexture(0, 0);
@@ -230,22 +337,24 @@ void CCommentWindow::Destroy()
 		osdCompositor_.UpdateSurface();
 	}
 	autoHideCount_ = 0;
+	parentSizedCount_ = 0;
 
 	delete pgTexture_;
+	pgTexture_ = nullptr;
 	delete pTextureBitmap_;
-	pgTexture_ = NULL;
-	pTextureBitmap_ = NULL;
+	pTextureBitmap_ = nullptr;
 }
 
-// ƒRƒƒ“ƒg‚Ì•`‰æƒXƒ^ƒCƒ‹‚ğİ’è‚·‚é
-// “®“I•ÏX‚É‚Í‘Î‰‚µ‚Ä‚¢‚È‚¢‚Ì‚ÅA‚±‚ê‚ğŒÄ‚ñ‚¾‚çDestroy()&Create()‚·‚é‚×‚«
-void CCommentWindow::SetStyle(LPCTSTR fontName, LPCTSTR fontNameMulti, bool bBold, bool bAntiAlias,
+// ã‚³ãƒ¡ãƒ³ãƒˆã®æç”»ã‚¹ã‚¿ã‚¤ãƒ«ã‚’è¨­å®šã™ã‚‹
+// å‹•çš„å¤‰æ›´ã«ã¯å¯¾å¿œã—ã¦ã„ãªã„ã®ã§ã€ã“ã‚Œã‚’å‘¼ã‚“ã ã‚‰Destroy()&Create()ã™ã‚‹ã¹ã
+void CCommentWindow::SetStyle(LPCTSTR fontName, LPCTSTR fontNameMulti, LPCTSTR fontNameEmoji, bool bBold, bool bAntiAlias,
                               int fontOutline, bool bUseOsdCompositor, bool bUseTexture, bool bUseDrawingThread)
 {
 	WaitForIdleDrawingThread();
 	ClearChat();
-	lstrcpyn(fontName_, fontName, _countof(fontName_));
-	lstrcpyn(fontNameMulti_, fontNameMulti, _countof(fontNameMulti_));
+	_tcsncpy_s(fontName_, fontName, _TRUNCATE);
+	_tcsncpy_s(fontNameMulti_, fontNameMulti, _TRUNCATE);
+	_tcsncpy_s(fontNameEmoji_, fontNameEmoji, _TRUNCATE);
 	fontStyle_ = bBold ? Gdiplus::FontStyleBold : Gdiplus::FontStyleRegular;
 	bAntiAlias_ = bAntiAlias;
 	fontOutline_ = max(fontOutline, 0);
@@ -288,7 +397,7 @@ void CCommentWindow::SetDebugFlags(int debugFlags)
 	debugFlags_ = debugFlags;
 }
 
-// ì‹Æ—pƒrƒbƒgƒ}ƒbƒv‚ğŠm•Û
+// ä½œæ¥­ç”¨ãƒ“ãƒƒãƒˆãƒãƒƒãƒ—ã‚’ç¢ºä¿
 bool CCommentWindow::AllocateWorkBitmap(int width, int height, bool *pbRealloc)
 {
 	if (hbmWork_) {
@@ -298,13 +407,13 @@ bool CCommentWindow::AllocateWorkBitmap(int width, int height, bool *pbRealloc)
 			return true;
 		}
 		DeleteObject(hbmWork_);
-		hbmWork_ = NULL;
+		hbmWork_ = nullptr;
 	}
 	if (hdcWork_) {
 		DeleteDC(hdcWork_);
-		hdcWork_ = NULL;
+		hdcWork_ = nullptr;
 	}
-	//ƒfƒoƒCƒXƒRƒ“ƒeƒLƒXƒg‚à“¯‚ÉŠm•Û
+	//ãƒ‡ãƒã‚¤ã‚¹ã‚³ãƒ³ãƒ†ã‚­ã‚¹ãƒˆã‚‚åŒæ™‚ã«ç¢ºä¿
 	if (!hwnd_) {
 		return false;
 	}
@@ -314,89 +423,120 @@ bool CCommentWindow::AllocateWorkBitmap(int width, int height, bool *pbRealloc)
 	if (!hdcWork_) {
 		return false;
 	}
-	BITMAPINFO bmi = {0};
+	BITMAPINFO bmi = {};
 	bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
 	bmi.bmiHeader.biWidth = width;
 	bmi.bmiHeader.biHeight = height;
 	bmi.bmiHeader.biPlanes = 1;
 	bmi.bmiHeader.biBitCount = 32;
 	bmi.bmiHeader.biCompression = BI_RGB;
-	hbmWork_ = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &pBits_, NULL, 0);
+	hbmWork_ = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &pBits_, nullptr, 0);
 	*pbRealloc = true;
-	return hbmWork_ != NULL;
+	return hbmWork_ != nullptr;
 }
 
 void CCommentWindow::OnParentMove()
 {
 	if (hwnd_) {
-		RECT rc;
-		GetWindowRect(hwndParent_, &rc);
-		SetWindowPos(hwnd_, NULL, rc.left, rc.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+		GetWindowRect(hwndParent_, &rcParent_);
+		SetWindowPos(hwnd_, nullptr, rcParent_.left, rcParent_.top, 0, 0, SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
 	}
+}
+
+bool CCommentWindow::IsParentSized()
+{
+	if (hwnd_) {
+		RECT rc;
+		if (GetWindowRect(hwndParent_, &rc) && !EqualRect(&rc, &rcParent_)) {
+			return true;
+		}
+		if (bUseOsd_ && bShowOsd_) {
+			// å‹•ç”»ã‚µã‚¤ã‚ºã ã‘å¤‰åŒ–ã™ã‚‹ã‹ã‚‚ã—ã‚Œãªã„ãŸã‚
+			if (osdCompositor_.GetSurfaceRect(&rc) && !EqualRect(&rc, &rcOsdSurface_)) {
+				return true;
+			}
+		}
+	}
+	return false;
 }
 
 void CCommentWindow::OnParentSize()
 {
-	if (hwnd_ && bUseOsd_) {
-		if (bShowOsd_) {
+	if (hwnd_) {
+		GetWindowRect(hwndParent_, &rcParent_);
+		if (bUseOsd_ && bShowOsd_) {
 			osdCompositor_.DeleteTexture(0, 0);
 			bShowOsd_ = false;
 			RECT rc;
-			if (osdCompositor_.GetSurfaceRect(&rc) && rc.right-rc.left > 0 && rc.bottom-rc.top > 0) {
-				// ¶ã‚Æ‰E‰º‚ÉƒeƒNƒXƒ`ƒƒ“o˜^‚·‚é‚±‚Æ‚ÅOSD‚Ì•`‰æ—Ìˆæ‚ğ“®‰æ‘S‘Ì‚ÉŠg‚°‚é
-				BITMAPINFO bmi = {0};
-				bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-				bmi.bmiHeader.biWidth = 1;
-				bmi.bmiHeader.biHeight = 1;
-				bmi.bmiHeader.biPlanes = 1;
-				bmi.bmiHeader.biBitCount = 32;
-				bmi.bmiHeader.biCompression = BI_RGB;
-				void *pBits;
-				HBITMAP hbm = CreateDIBSection(NULL, &bmi, DIB_RGB_COLORS, &pBits, NULL, 0);
-				if (hbm) {
-					*static_cast<DWORD*>(pBits) = 0/*0xFF00FF00*/;
-					osdCompositor_.AddTexture(hbm, 0, 0, true, 0);
-					osdCompositor_.AddTexture(hbm, rc.right-rc.left-1, rc.bottom-rc.top-1, true, 0);
-					DeleteObject(hbm);
-					bShowOsd_ = true;
+			if (osdCompositor_.GetSurfaceRect(&rc)) {
+				rcOsdSurface_ = rc;
+				if (rc.right - rc.left > 0 && rc.bottom - rc.top > 0) {
+					// å·¦ä¸Šã¨å³ä¸‹ã«ãƒ†ã‚¯ã‚¹ãƒãƒ£ç™»éŒ²ã™ã‚‹ã“ã¨ã§OSDã®æç”»é ˜åŸŸã‚’å‹•ç”»å…¨ä½“ã«æ‹¡ã’ã‚‹
+					BITMAPINFO bmi = {};
+					bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+					bmi.bmiHeader.biWidth = 1;
+					bmi.bmiHeader.biHeight = 1;
+					bmi.bmiHeader.biPlanes = 1;
+					bmi.bmiHeader.biBitCount = 32;
+					bmi.bmiHeader.biCompression = BI_RGB;
+					void *pBits;
+					HBITMAP hbm = CreateDIBSection(nullptr, &bmi, DIB_RGB_COLORS, &pBits, nullptr, 0);
+					if (hbm) {
+						*static_cast<DWORD*>(pBits) = 0/*0xFF00FF00*/;
+						osdCompositor_.AddTexture(hbm, 0, 0, true, 0);
+						osdCompositor_.AddTexture(hbm, rc.right-rc.left-1, rc.bottom-rc.top-1, true, 0);
+						DeleteObject(hbm);
+						bShowOsd_ = true;
+					}
 				}
 			}
+		} else if (!bUseOsd_) {
+			RECT rc = rcParent_;
+			SetWindowPos(hwnd_, nullptr, rc.left, rc.top, rc.right-rc.left, rc.bottom-rc.top, SWP_NOZORDER | SWP_NOACTIVATE);
 		}
-	} else if (hwnd_ && !bUseOsd_) {
-		RECT rc;
-		GetWindowRect(hwndParent_, &rc);
-		SetWindowPos(hwnd_, NULL, rc.left, rc.top, rc.right-rc.left, rc.bottom-rc.top, SWP_NOZORDER | SWP_NOACTIVATE);
 	}
 }
 
-// ƒRƒƒ“ƒg‚ğ1‚Â‚¾‚¯’Ç‰Á‚·‚é
+// ã‚³ãƒ¡ãƒ³ãƒˆã‚’1ã¤ã ã‘è¿½åŠ ã™ã‚‹
 void CCommentWindow::AddChat(LPCTSTR text, COLORREF color, CHAT_POSITION position,
                              CHAT_SIZE size, CHAT_ALIGN align, bool bInsertLast, BYTE backOpacity, int delay)
 {
 	if (hwnd_) {
-		CHAT c;
+		std::list<CHAT> lc(1);
+		CHAT &c = lc.front();
 		c.pts = rts_ + delay;
 		c.count = ++chatCount_;
 		c.line = INT_MAX;
-		c.color = Gdiplus::Color::MakeARGB(bAntiAlias_ ? backOpacity : backOpacity ? 255 : 0, GetRValue(color), GetGValue(color), GetBValue(color));
+		c.colorB = GetBValue(color);
+		c.colorG = GetGValue(color);
+		c.colorR = GetRValue(color);
+		c.colorA = bAntiAlias_ ? backOpacity : backOpacity ? 255 : 0;
 		c.position = position;
 		c.bSmall = size != CHAT_SIZE_DEFAULT;
 		c.alignFactor = position==CHAT_POS_DEFAULT || align==CHAT_ALIGN_LEFT ? 0 : align==CHAT_ALIGN_RIGHT ? 2 : 1;
 		c.bInsertLast = position!=CHAT_POS_DEFAULT && bInsertLast;
-		lstrcpyn(c.text, text, _countof(c.text));
-		c.bMultiLine = StrChr(c.text, TEXT('\n')) != NULL;
+		c.text.reserve(_tcslen(text));
+		c.bMultiLine = false;
+		for (size_t i = 0; text[i]; ++i) {
+			if (text[i] != TEXT('\r')) {
+				c.text.push_back(text[i]);
+				if (text[i] == TEXT('\n')) {
+					c.bMultiLine = true;
+				}
+			}
+		}
 		c.bDrew = false;
-		// ˆêƒŠƒXƒg‚É’Ç‰Á(•`‰æ‚ÉchatList_‚Éƒ}[ƒW)
-		CBlockLock lock(&chatLock_);
-		chatPoolList_.push_back(c);
+		// ä¸€æ™‚ãƒªã‚¹ãƒˆã«è¿½åŠ (æç”»æ™‚ã«chatList_ã«ãƒãƒ¼ã‚¸)
+		lock_recursive_mutex lock(chatLock_);
+		chatPoolList_.splice(chatPoolList_.end(), lc);
 	}
 }
 
-// ÅŒã‚É’Ç‰Á‚³‚ê‚½“¯‚ÌƒRƒƒ“ƒg‚Ì•\¦ƒ^ƒCƒ~ƒ“ƒO‚ğduration‚Ì”ÍˆÍ“à‚Å“K“–‚ÉU‚ç‚·
+// æœ€å¾Œã«è¿½åŠ ã•ã‚ŒãŸåŒæ™‚åˆ»ã®ã‚³ãƒ¡ãƒ³ãƒˆã®è¡¨ç¤ºã‚¿ã‚¤ãƒŸãƒ³ã‚°ã‚’durationã®ç¯„å›²å†…ã§é©å½“ã«æ•£ã‚‰ã™
 void CCommentWindow::ScatterLatestChats(int duration)
 {
 	if (hwnd_ && duration > 0) {
-		CBlockLock lock(&chatLock_);
+		lock_recursive_mutex lock(chatLock_);
 		std::list<CHAT>::iterator it = chatPoolList_.begin();
 		DWORD latestPts = 0;
 		int latestNum = 0;
@@ -426,18 +566,17 @@ void CCommentWindow::ClearChat()
 #define DWORD_MSB(x) ((x) & 0x80000000)
 #define DWORD_DIFF(a,b) (DWORD_MSB((a)-(b)) ? -(int)((b)-(a)) : (int)((a)-(b)))
 
-// ƒEƒBƒ“ƒhƒE‚Ìƒ^ƒCƒ€ƒXƒ^ƒ“ƒv‚ğ‘Oi‚³‚¹‚é
-// ƒXƒŒƒbƒh‚Ì•`‰æŠ®—¹‚ğ‘Ò‚Â‚Ì‚ÅŒÄ‚Ôƒ^ƒCƒ~ƒ“ƒO‚É’ˆÓ
+// ã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ã®ã‚¿ã‚¤ãƒ ã‚¹ã‚¿ãƒ³ãƒ—ã‚’å‰é€²ã•ã›ã‚‹
+// ã‚¹ãƒ¬ãƒƒãƒ‰ã®æç”»å®Œäº†ã‚’å¾…ã¤ã®ã§å‘¼ã¶ã‚¿ã‚¤ãƒŸãƒ³ã‚°ã«æ³¨æ„
 void CCommentWindow::Forward(int duration)
 {
 	WaitForIdleDrawingThread();
 
 	if (duration > 0) {
 		rts_ += duration;
-		std::list<CHAT>::const_iterator it = chatList_.begin();
-		while (it != chatList_.end()) {
-			// •\¦ŠúŒÀØ‚ê‚ÌƒRƒƒ“ƒg‚ğ’Ç‚¢o‚·
-			// ƒ^ƒCƒ€ƒXƒ^ƒ“ƒv‚ÌŒvZ‚Í2^32‚ğ–@‚Æ‚·‚é‡“¯®
+		for (auto it = chatList_.cbegin(); it != chatList_.end(); ) {
+			// è¡¨ç¤ºæœŸé™åˆ‡ã‚Œã®ã‚³ãƒ¡ãƒ³ãƒˆã‚’è¿½ã„å‡ºã™
+			// ã‚¿ã‚¤ãƒ ã‚¹ã‚¿ãƒ³ãƒ—ã®è¨ˆç®—ã¯2^32ã‚’æ³•ã¨ã™ã‚‹åˆåŒå¼
 			if (DWORD_MSB(it->pts + displayDuration_ - rts_)) {
 				if (it->position == CHAT_POS_SHITA && it->bDrew) {
 					bForceRefreshDirty_ = true;
@@ -447,8 +586,7 @@ void CCommentWindow::Forward(int duration)
 				++it;
 			}
 		}
-		it = chatPoolList_.begin();
-		while (it != chatPoolList_.end()) {
+		for (auto it = chatPoolList_.cbegin(); it != chatPoolList_.end(); ) {
 			if (DWORD_MSB(it->pts + displayDuration_ - rts_)) {
 				it = chatPoolList_.erase(it);
 			} else {
@@ -463,7 +601,7 @@ void CCommentWindow::Update()
 	WaitForIdleDrawingThread();
 
 	if (hwnd_ && bUseOsd_) {
-		// OSD‚É•`‰æ
+		// OSDã«æç”»
 		if (bShowOsd_) {
 			osdCompositor_.UpdateSurface();
 		} else {
@@ -476,7 +614,7 @@ void CCommentWindow::Update()
 			}
 		}
 	} else if (hwnd_ && !bUseOsd_) {
-		// ƒŒƒCƒ„[ƒhƒEƒBƒ“ƒhƒE‚É•`‰æ
+		// ãƒ¬ã‚¤ãƒ¤ãƒ¼ãƒ‰ã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ã«æç”»
 		if (IsWindowVisible(hwnd_)) {
 			UpdateLayeredWindow();
 		} else {
@@ -490,9 +628,9 @@ void CCommentWindow::Update()
 
 void CCommentWindow::UpdateLayeredWindow()
 {
-	ASSERT(!hDrawingThread_ || WaitForSingleObject(hDrawingIdleEvent_, 0) == WAIT_OBJECT_0);
+	ASSERT(!drawingThread_.joinable() || WaitForSingleObject(hDrawingIdleEvent_, 0) == WAIT_OBJECT_0);
 
-	// GDIƒIƒuƒWƒFƒNƒg‚ğŠm•Û
+	// GDIã‚ªãƒ–ã‚¸ã‚§ã‚¯ãƒˆã‚’ç¢ºä¿
 	RECT rc;
 	GetClientRect(hwnd_, &rc);
 	int width = rc.right;
@@ -511,19 +649,19 @@ void CCommentWindow::UpdateLayeredWindow()
 		SetRect(&rcUnusedIntersect_, 0, 0, width, height);
 		SetRect(&rcDirty_, 0, 0, width, height);
 	}
-	// 1‚Â‘O‚Ì•`‰æŒ‹‰Ê‚ğ‘¦À‚É“K—p‚·‚é‚±‚Æ‚Å“¯Šú‚ª‚¸‚ê‚é‰Â”\«‚ğ‰º‚°‚é
+	// 1ã¤å‰ã®æç”»çµæœã‚’å³åº§ã«é©ç”¨ã™ã‚‹ã“ã¨ã§åŒæœŸãŒãšã‚Œã‚‹å¯èƒ½æ€§ã‚’ä¸‹ã’ã‚‹
 	SIZE sz = {width, height};
 	POINT ptSrc = {0, 0};
 	BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-	// ƒ_[ƒeƒB—Ìˆæ‚ğw¦‚·‚é‚ÆŠÕU‚Æ‚µ‚½À‹µ‚ÅÀ‘ª25%‹­Œy‚¢
+	// ãƒ€ãƒ¼ãƒ†ã‚£é ˜åŸŸã‚’æŒ‡ç¤ºã™ã‚‹ã¨é–‘æ•£ã¨ã—ãŸå®Ÿæ³ã§å®Ÿæ¸¬25%å¼·è»½ã„
 	HDC hdc = GetDC(hwnd_);
-	UpdateLayeredWindow(hwnd_, hdc, NULL, &sz, hdcWork_, &ptSrc, RGB(12, 12, 12), &blend, bAntiAlias_ ? ULW_ALPHA : ULW_COLORKEY, &rcDirty_);
+	UpdateLayeredWindow(hwnd_, hdc, nullptr, &sz, hdcWork_, &ptSrc, RGB(12, 12, 12), &blend, bAntiAlias_ ? ULW_ALPHA : ULW_COLORKEY, &rcDirty_);
 	ReleaseDC(hwnd_, hdc);
 	SelectObject(hdcWork_, hbmOld);
 
-	if (hDrawingThread_) {
-		// ‚ ‚Æ‚ÍƒXƒŒƒbƒh‚É”C‚¹‚é
-		// –Ú“I‚Í‚‘¬‰»‚Å‚Í‚È‚­ƒƒCƒ“ƒXƒŒƒbƒh‚ÌS‘©ŠÔ‚ğŒ¸‚ç‚·‚±‚Æ
+	if (drawingThread_.joinable()) {
+		// ã‚ã¨ã¯ã‚¹ãƒ¬ãƒƒãƒ‰ã«ä»»ã›ã‚‹
+		// ç›®çš„ã¯é«˜é€ŸåŒ–ã§ã¯ãªããƒ¡ã‚¤ãƒ³ã‚¹ãƒ¬ãƒƒãƒ‰ã®æ‹˜æŸæ™‚é–“ã‚’æ¸›ã‚‰ã™ã“ã¨
 		ResetEvent(hDrawingIdleEvent_);
 		SetEvent(hDrawingEvent_);
 	} else {
@@ -531,23 +669,21 @@ void CCommentWindow::UpdateLayeredWindow()
 	}
 }
 
-// •`‰æƒXƒŒƒbƒh
-unsigned int __stdcall CCommentWindow::DrawingThread(void *pParam)
+// æç”»ã‚¹ãƒ¬ãƒƒãƒ‰
+void CCommentWindow::DrawingThread()
 {
-	CCommentWindow *pThis = static_cast<CCommentWindow*>(pParam);
-	while (WaitForSingleObject(pThis->hDrawingEvent_, INFINITE) == WAIT_OBJECT_0 && !pThis->bQuitDrawingThread_) {
-		pThis->UpdateChat();
-		// ‚±‚ê‚ªƒVƒOƒiƒ‹ó‘Ô‚Ì‚Æ‚«•`‰æƒXƒŒƒbƒh‚Íƒƒ“ƒo•Ï”‚ÉƒAƒNƒZƒX‚µ‚Ä‚Í‚¢‚¯‚È‚¢
-		SetEvent(pThis->hDrawingIdleEvent_);
+	while (WaitForSingleObject(hDrawingEvent_, INFINITE) == WAIT_OBJECT_0 && !bQuitDrawingThread_) {
+		UpdateChat();
+		// ã“ã‚ŒãŒã‚·ã‚°ãƒŠãƒ«çŠ¶æ…‹ã®ã¨ãæç”»ã‚¹ãƒ¬ãƒƒãƒ‰ã¯ãƒ¡ãƒ³ãƒå¤‰æ•°ã«ã‚¢ã‚¯ã‚»ã‚¹ã—ã¦ã¯ã„ã‘ãªã„
+		SetEvent(hDrawingIdleEvent_);
 	}
-	pThis->bQuitDrawingThread_ = true;
-	return 0;
+	bQuitDrawingThread_ = true;
 }
 
-// •`‰æƒXƒŒƒbƒh‚ªƒAƒCƒhƒ‹ó‘Ô‚É‚È‚é‚Ì‚ğ‘Ò‚Â
+// æç”»ã‚¹ãƒ¬ãƒƒãƒ‰ãŒã‚¢ã‚¤ãƒ‰ãƒ«çŠ¶æ…‹ã«ãªã‚‹ã®ã‚’å¾…ã¤
 bool CCommentWindow::WaitForIdleDrawingThread()
 {
-	return !hDrawingThread_ || bQuitDrawingThread_ || WaitForSingleObject(hDrawingIdleEvent_, INFINITE) == WAIT_OBJECT_0;
+	return !drawingThread_.joinable() || bQuitDrawingThread_ || WaitForSingleObject(hDrawingIdleEvent_, INFINITE) == WAIT_OBJECT_0;
 }
 
 void CCommentWindow::UpdateChat()
@@ -560,29 +696,29 @@ void CCommentWindow::UpdateChat()
 	int height = bm.bmHeight;
 	HBITMAP hbmOld = static_cast<HBITMAP>(SelectObject(hdcWork_, hbmWork_));
 
-	// GDI+•`‰æƒXƒR[ƒv
+	// GDI+æç”»ã‚¹ã‚³ãƒ¼ãƒ—
 	{
 		Gdiplus::Graphics g(hdcWork_);
-		// ‡¬•û®(“§‰ßorƒJƒ‰[ƒL[)‚É‚æ‚Á‚Ä”wŒiF‚ğ•Ï‚¦‚é
+		// åˆæˆæ–¹å¼(é€éorã‚«ãƒ©ãƒ¼ã‚­ãƒ¼)ã«ã‚ˆã£ã¦èƒŒæ™¯è‰²ã‚’å¤‰ãˆã‚‹
 		Gdiplus::SolidBrush br(bAntiAlias_ ? Gdiplus::Color::Transparent : Gdiplus::Color(12, 12, 12));
 		if (debugFlags_ & 8) {
-			// Debug:‰Šú‰»—Ìˆæ‚ÉF‚ğ‚Â‚¯‚é
+			// Debug:åˆæœŸåŒ–é ˜åŸŸã«è‰²ã‚’ã¤ã‘ã‚‹
 			static DWORD s_count;
 			br.SetColor(Gdiplus::Color(128, 0, ++s_count * 2 % 256, 0));
 		}
 		g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
-		// 60fps‚ ‚½‚è‚É‚È‚é‚Æ‰Šú‰»ƒRƒXƒg‚à”n­‚É‚Å‚«‚È‚¢‚Ì‚Åg—pÏ‚İ•”•ª‚¾‚¯ƒNƒŠƒA(ŠÕU‚Æ‚µ‚½À‹µ‚Å‚ÍÀ‘ª15%Œy‚¢)
+		// 60fpsã‚ãŸã‚Šã«ãªã‚‹ã¨åˆæœŸåŒ–ã‚³ã‚¹ãƒˆã‚‚é¦¬é¹¿ã«ã§ããªã„ã®ã§ä½¿ç”¨æ¸ˆã¿éƒ¨åˆ†ã ã‘ã‚¯ãƒªã‚¢(é–‘æ•£ã¨ã—ãŸå®Ÿæ³ã§ã¯å®Ÿæ¸¬15%è»½ã„)
 		g.FillRectangle(&br, 0, 0, width, rcUnused_.top);
 		g.FillRectangle(&br, 0, rcUnused_.bottom, width, height - rcUnused_.bottom);
 		RECT rcLast = rcUnusedWoShita_;
 		bool bHasFirstDrawShita;
 		DrawChat(g, width, height, &rcUnused_, &rcUnusedWoShita_, &bHasFirstDrawShita);
-		// ƒNƒŠƒA+g—pÏ‚İ==ƒ_[ƒeƒB—Ìˆæ
+		// ã‚¯ãƒªã‚¢+ä½¿ç”¨æ¸ˆã¿==ãƒ€ãƒ¼ãƒ†ã‚£é ˜åŸŸ
 		IntersectRect(&rcDirty_, &rcLast, &rcUnusedWoShita_);
-		// g—pÏ‚İ—Ìˆæ‚ğÏZ
+		// ä½¿ç”¨æ¸ˆã¿é ˜åŸŸã‚’ç©ç®—
 		RECT rcTmp = rcUnusedIntersect_;
 		IntersectRect(&rcUnusedIntersect_, &rcTmp, &rcUnused_);
-		// ‰º‚ÍÃ~ƒRƒ‚µ‚©‚È‚¢‚Ì‚Åƒ_[ƒeƒB—ÌˆæXV‚ğƒTƒ{‚é
+		// ä¸‹ã¯é™æ­¢ã‚³ãƒ¡ã—ã‹ãªã„ã®ã§ãƒ€ãƒ¼ãƒ†ã‚£é ˜åŸŸæ›´æ–°ã‚’ã‚µãƒœã‚‹
 		if (bHasFirstDrawShita || bForceRefreshDirty_) {
 			rcDirty_ = rcUnusedIntersect_;
 			rcUnusedIntersect_ = rcUnused_;
@@ -594,7 +730,7 @@ void CCommentWindow::UpdateChat()
 	SelectObject(hdcWork_, hbmOld);
 
 	if (bAntiAlias_ && opacity_ != 255) {
-		// •s“§–¾“x‚ğ“K—p(BLENDFUNCTION‚Å‚à‰Â”\‚¾‚¯‚Ç‚â‚½‚çd‚¢)
+		// ä¸é€æ˜åº¦ã‚’é©ç”¨(BLENDFUNCTIONã§ã‚‚å¯èƒ½ã ã‘ã©ã‚„ãŸã‚‰é‡ã„)
 		ApplyOpacity(static_cast<DWORD*>(pBits_), width * (height - rcUnused_.bottom), opacity_, opacity_, bSse2Available_);
 		ApplyOpacity(static_cast<DWORD*>(pBits_) + width * (height - rcUnused_.top), width * rcUnused_.top, opacity_, opacity_, bSse2Available_);
 	}
@@ -621,26 +757,26 @@ BOOL CCommentWindow::UpdateLayeredWindow(HWND hWnd, HDC hdcDst, POINT *pptDst, S
 	}
 }
 
-// ƒT[ƒtƒFƒCƒX‡¬‚ÌƒR[ƒ‹ƒoƒbƒN
-// COsdCompositor::UpdateSurface()‚©‚çŒÄ‚Î‚ê‚é‚Ì‚Å•K‚¸ƒƒCƒ“ƒXƒŒƒbƒh
+// ã‚µãƒ¼ãƒ•ã‚§ã‚¤ã‚¹åˆæˆæ™‚ã®ã‚³ãƒ¼ãƒ«ãƒãƒƒã‚¯
+// COsdCompositor::UpdateSurface()ã‹ã‚‰å‘¼ã°ã‚Œã‚‹ã®ã§å¿…ãšãƒ¡ã‚¤ãƒ³ã‚¹ãƒ¬ãƒƒãƒ‰
 BOOL CALLBACK CCommentWindow::UpdateCallback(void *pBits, const RECT *pSurfaceRect, int pitch, void *pClientData)
 {
 	CCommentWindow *pThis = static_cast<CCommentWindow*>(pClientData);
 	int width = pSurfaceRect->right - pSurfaceRect->left;
 	int height = pSurfaceRect->bottom - pSurfaceRect->top;
 
-	// GDI+•`‰æƒXƒR[ƒv
+	// GDI+æç”»ã‚¹ã‚³ãƒ¼ãƒ—
 	if (pThis->bShowOsd_ && width > 0 && height > 0) {
 		RECT rcUnused, rcUnusedWoShita;
 		bool bHasFirstDrawShita;
 		{
-			// Premult‚É‚·‚é‚ÆÀ‘ª‚Å10%’ö“xŒy‚¢‚¯‚ÇOsdCompositor‚Í”ñPremult‚È‚Ì‚Å”¼“§–¾•”•ª‚ª‚È‚¢‚Æ‚«‚¾‚¯g‚¤
+			// Premultã«ã™ã‚‹ã¨å®Ÿæ¸¬ã§10%ç¨‹åº¦è»½ã„ã‘ã©OsdCompositorã¯éPremultãªã®ã§åŠé€æ˜éƒ¨åˆ†ãŒãªã„ã¨ãã ã‘ä½¿ã†
 			Gdiplus::Bitmap bitmap(width, height, pitch, !pThis->bAntiAlias_ ? PixelFormat32bppPARGB : PixelFormat32bppARGB, static_cast<BYTE*>(pBits));
 			Gdiplus::Graphics g(&bitmap);
 			pThis->DrawChat(g, width, height, &rcUnused, &rcUnusedWoShita, &bHasFirstDrawShita);
 		}
 		if (pThis->opacity_ != 255 && pitch % 4 == 0) {
-			// •s“§–¾“x‚ğ“K—p
+			// ä¸é€æ˜åº¦ã‚’é©ç”¨
 			ApplyOpacity(static_cast<DWORD*>(pBits), pitch / 4 * rcUnused.top, pThis->opacity_, 255, pThis->bSse2Available_);
 			ApplyOpacity(static_cast<DWORD*>(pBits) + pitch / 4 * rcUnused.bottom, pitch / 4 * (height - rcUnused.bottom), pThis->opacity_, 255, pThis->bSse2Available_);
 		}
@@ -648,26 +784,26 @@ BOOL CALLBACK CCommentWindow::UpdateCallback(void *pBits, const RECT *pSurfaceRe
 	return FALSE;
 }
 
-// ƒRƒƒ“ƒg‚ğ•`‰æ‚·‚é
-// ƒƒCƒ“‚à‚µ‚­‚Í•`‰æƒXƒŒƒbƒh‚©‚çŒÄ‚Î‚ê‚é‚Ì‚Åƒƒ“ƒo•Ï”‚Ö‚ÌƒAƒNƒZƒX‚É’ˆÓ
-// prcUnused: •`‰æ‚µ‚È‚©‚Á‚½(ƒRƒƒ“ƒg‚Ì‘¶İ‚µ‚È‚¢)—Ìˆæ‚ğ•Ô‚·Bleft,rightƒtƒB[ƒ‹ƒh‚Íˆê‰Ši”[‚µ‚Ä‚¢‚é‚ªˆÓ–¡‚Í‚È‚¢
-// prcUnusedWoShita: “¯ã‚¾‚ª‰ºƒRƒ‚ğ–³‹‚µ‚½—Ìˆæ‚ğ•Ô‚·
-// pbHasFirstDrawShita: ‰‚ß‚Ä•`‰æŠJn‚³‚ê‚½‰ºƒRƒ‚ª‚ ‚é‚©‚Ç‚¤‚©•Ô‚·
+// ã‚³ãƒ¡ãƒ³ãƒˆã‚’æç”»ã™ã‚‹
+// ãƒ¡ã‚¤ãƒ³ã‚‚ã—ãã¯æç”»ã‚¹ãƒ¬ãƒƒãƒ‰ã‹ã‚‰å‘¼ã°ã‚Œã‚‹ã®ã§ãƒ¡ãƒ³ãƒå¤‰æ•°ã¸ã®ã‚¢ã‚¯ã‚»ã‚¹ã«æ³¨æ„
+// prcUnused: æç”»ã—ãªã‹ã£ãŸ(ã‚³ãƒ¡ãƒ³ãƒˆã®å­˜åœ¨ã—ãªã„)é ˜åŸŸã‚’è¿”ã™ã€‚left,rightãƒ•ã‚£ãƒ¼ãƒ«ãƒ‰ã¯ä¸€å¿œæ ¼ç´ã—ã¦ã„ã‚‹ãŒæ„å‘³ã¯ãªã„
+// prcUnusedWoShita: åŒä¸Šã ãŒä¸‹ã‚³ãƒ¡ã‚’ç„¡è¦–ã—ãŸé ˜åŸŸã‚’è¿”ã™
+// pbHasFirstDrawShita: åˆã‚ã¦æç”»é–‹å§‹ã•ã‚ŒãŸä¸‹ã‚³ãƒ¡ãŒã‚ã‚‹ã‹ã©ã†ã‹è¿”ã™
 void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT *prcUnused, RECT *prcUnusedWoShita, bool *pbHasFirstDrawShita)
 {
 	{
-		// Å¬EÅ‘å•¶šƒTƒCƒY‚É‰‚¶‚Ä•\¦ƒ‰ƒCƒ“”‚ğ‘Œ¸‚·‚é
+		// æœ€å°ãƒ»æœ€å¤§æ–‡å­—ã‚µã‚¤ã‚ºã«å¿œã˜ã¦è¡¨ç¤ºãƒ©ã‚¤ãƒ³æ•°ã‚’å¢—æ¸›ã™ã‚‹
 		int lineCountMax = static_cast<int>(fontScale_ * height / commentSizeMin_);
 		int lineCountMin = static_cast<int>(fontScale_ * height / commentSizeMax_);
 		int actLineCount = min(max(lineCount_, lineCountMin), max(lineCountMax, 1));
 
 		int textureWidth = max(width, TEXTURE_BITMAP_WIDTH_MIN);
 		if (bUseTexture_) {
-			// ƒeƒNƒXƒ`ƒƒ—pƒrƒbƒgƒ}ƒbƒv‚ğŠm•Û
+			// ãƒ†ã‚¯ã‚¹ãƒãƒ£ç”¨ãƒ“ãƒƒãƒˆãƒãƒƒãƒ—ã‚’ç¢ºä¿
 			if (!pTextureBitmap_ || (int)pTextureBitmap_->GetWidth() != textureWidth || (int)pTextureBitmap_->GetHeight() != height) {
 				delete pgTexture_;
 				delete pTextureBitmap_;
-				// Premult‚Ì•û‚ª‚©‚È‚èŒy•‰‰× (Ql: http://www.codeproject.com/Tips/66909/Rendering-fast-with-GDI-What-to-do-and-what-not-to )
+				// Premultã®æ–¹ãŒã‹ãªã‚Šè»½è² è· (å‚è€ƒ: http://www.codeproject.com/Tips/66909/Rendering-fast-with-GDI-What-to-do-and-what-not-to )
 				pTextureBitmap_ = new Gdiplus::Bitmap(textureWidth, height, PixelFormat32bppPARGB);
 				pgTexture_ = new Gdiplus::Graphics(pTextureBitmap_);
 				pgTexture_->SetTextRenderingHint(bAntiAlias_ ? Gdiplus::TextRenderingHintAntiAlias : Gdiplus::TextRenderingHintSingleBitPerPixel);
@@ -675,35 +811,57 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 			}
 		}
 		g.SetTextRenderingHint(bAntiAlias_ ? Gdiplus::TextRenderingHintAntiAlias : Gdiplus::TextRenderingHintSingleBitPerPixel);
-		Gdiplus::REAL fontEm = (Gdiplus::REAL)(fontScale_ * height / actLineCount * 0.75);
-		Gdiplus::REAL fontEmSmall = (Gdiplus::REAL)(fontSmallScale_ * height / actLineCount * 0.75);
-		Gdiplus::Font font(fontName_, fontEm, fontStyle_);
-		Gdiplus::Font fontSmall(fontName_, fontEmSmall, fontStyle_);
-		// •¡”s—pƒtƒHƒ“ƒg
-		Gdiplus::Font tmpFontMulti(fontNameMulti_, fontEm, fontStyle_);
-		Gdiplus::Font tmpFontMultiSmall(fontNameMulti_, fontEmSmall, fontStyle_);
-		// ‰Â”\‚È‚ç“¯‚¶ƒIƒuƒWƒFƒNƒg‚ğQÆ‚µ‚Ä‚¨‚­(‚¢‚¢‚±‚Æ‚ ‚é‚©‚à‚µ‚ê‚È‚¢‚Ì‚Å)
-		bool bSameMultiFont = !lstrcmp(fontName_, fontNameMulti_);
-		const Gdiplus::Font &fontMulti = bSameMultiFont ? font : tmpFontMulti;
-		const Gdiplus::Font &fontMultiSmall = bSameMultiFont ? fontSmall : tmpFontMultiSmall;
+		Gdiplus::REAL fontEm = static_cast<Gdiplus::REAL>(fontScale_ * height / actLineCount);
+		Gdiplus::REAL fontEmSmall = static_cast<Gdiplus::REAL>(fontSmallScale_ * height / actLineCount);
+		int fontStyle = fontStyle_;
+		Gdiplus::Font font(fontName_, fontEm * 0.75f, fontStyle);
+		Gdiplus::Font fontSmall(fontName_, fontEmSmall * 0.75f, fontStyle);
+		// è¤‡æ•°è¡Œç”¨ãƒ•ã‚©ãƒ³ãƒˆ
+		Gdiplus::Font tmpFontMulti(fontNameMulti_, fontEm * 0.75f, fontStyle);
+		Gdiplus::Font tmpFontMultiSmall(fontNameMulti_, fontEmSmall * 0.75f, fontStyle);
+		// çµµæ–‡å­—ç”¨ãƒ•ã‚©ãƒ³ãƒˆ
+		Gdiplus::Font tmpFontEmoji(fontNameEmoji_[0] ? fontNameEmoji_ : fontName_, fontEm * 0.75f, fontStyle);
+		Gdiplus::Font tmpFontEmojiSmall(fontNameEmoji_[0] ? fontNameEmoji_ : fontName_, fontEmSmall * 0.75f, fontStyle);
+
+		// å¯èƒ½ãªã‚‰åŒã˜ã‚ªãƒ–ã‚¸ã‚§ã‚¯ãƒˆã‚’å‚ç…§ã—ã¦ãŠã(ã„ã„ã“ã¨ã‚ã‚‹ã‹ã‚‚ã—ã‚Œãªã„ã®ã§)
+		bool bSameMulti = !_tcscmp(fontName_, fontNameMulti_);
+		bool bSameEmoji = !fontNameEmoji_[0] || !_tcscmp(fontName_, fontNameEmoji_);
+		bool bSameMultiEmoji = !fontNameEmoji_[0] || !_tcscmp(fontNameMulti_, fontNameEmoji_);
+		const Gdiplus::Font &fontMulti = bSameMulti ? font : tmpFontMulti;
+		const Gdiplus::Font &fontMultiSmall = bSameMulti ? fontSmall : tmpFontMultiSmall;
+		const Gdiplus::Font &fontEmoji = bSameEmoji ? font : tmpFontEmoji;
+		const Gdiplus::Font &fontEmojiSmall = bSameEmoji ? fontSmall : tmpFontEmojiSmall;
+		const Gdiplus::Font &fontMultiEmoji = bSameMultiEmoji ? fontMulti : tmpFontEmoji;
+		const Gdiplus::Font &fontMultiEmojiSmall = bSameMultiEmoji ? fontMultiSmall : tmpFontEmojiSmall;
+
+		Gdiplus::FontFamily fontFamily;
+		Gdiplus::FontFamily fontFamilyMulti;
+		Gdiplus::FontFamily fontFamilyEmoji;
+		Gdiplus::FontFamily fontFamilyMultiEmoji;
+		font.GetFamily(&fontFamily);
+		fontMulti.GetFamily(&fontFamilyMulti);
+		fontEmoji.GetFamily(&fontFamilyEmoji);
+		fontMultiEmoji.GetFamily(&fontFamilyMultiEmoji);
 
 		{
-		CBlockLock lock(&chatLock_);
+		lock_recursive_mutex lock(chatLock_);
 
-		// V‚µ‚¢ƒRƒƒ“ƒg‚ª‚ ‚ê‚Îd‚È‚ç‚È‚¢‚æ‚¤‚ÉƒŠƒXƒg‚ğÄ”z’u‚·‚é
+		// æ–°ã—ã„ã‚³ãƒ¡ãƒ³ãƒˆãŒã‚ã‚Œã°é‡ãªã‚‰ãªã„ã‚ˆã†ã«ãƒªã‚¹ãƒˆã‚’å†é…ç½®ã™ã‚‹
 		while (!chatPoolList_.empty()) {
-			CHAT c = chatPoolList_.front();
-			chatPoolList_.pop_front();
-			// ÀÛ‚Ì•`‰æƒTƒCƒY‚ğŒv‘ª
-			const Gdiplus::Font *pFont = c.bMultiLine ? &(c.bSmall ? fontMultiSmall : fontMulti) : &(c.bSmall ? fontSmall : font);
+			CHAT &c = chatPoolList_.front();
+			// å®Ÿéš›ã®æç”»ã‚µã‚¤ã‚ºã‚’è¨ˆæ¸¬
+			const Gdiplus::Font &selFont = c.bMultiLine ? (c.bSmall ? fontMultiSmall : fontMulti) : (c.bSmall ? fontSmall : font);
+			const Gdiplus::Font &selFontEmoji = c.bMultiLine ? (c.bSmall ? fontMultiEmojiSmall : fontMultiEmoji) : (c.bSmall ? fontEmojiSmall : fontEmoji);
+			Gdiplus::REAL selFontEm = c.bSmall ? fontEmSmall : fontEm;
 			Gdiplus::RectF rcDraw;
-			if (g.MeasureString(c.text, -1, pFont, Gdiplus::PointF(0, 0), &rcDraw) != Gdiplus::Ok) {
+			if (!MeasureString(g, c.text, selFont, selFontEmoji, selFontEm, Gdiplus::PointF(0, 0), &rcDraw)) {
+				chatPoolList_.pop_front();
 				continue;
 			}
 			c.currentDrawWidth = (int)rcDraw.Width;
 			c.currentDrawHeight = (int)rcDraw.Height;
-			// ƒRƒƒ“ƒg‚Ì•\¦ƒ‰ƒCƒ“‚ğİ’è‚·‚é
-			// ‰ºƒRƒ‚Í•¡”s‘Î‰‚Ì‚½‚ß‚É‰º’[‚ª•\¦‚Å‚«‚éƒ‰ƒCƒ“‚æ‚èã‚É”z’u
+			// ã‚³ãƒ¡ãƒ³ãƒˆã®è¡¨ç¤ºãƒ©ã‚¤ãƒ³ã‚’è¨­å®šã™ã‚‹
+			// ä¸‹ã‚³ãƒ¡æ™‚ã¯è¤‡æ•°è¡Œå¯¾å¿œã®ãŸã‚ã«ä¸‹ç«¯ãŒè¡¨ç¤ºã§ãã‚‹ãƒ©ã‚¤ãƒ³ã‚ˆã‚Šä¸Šã«é…ç½®
 			c.line = c.position == CHAT_POS_SHITA && c.bMultiLine ? actLineCount - 1 - (int)((double)rcDraw.Height / height * actLineCount) :
 			         c.position == CHAT_POS_SHITA ? actLineCount - 1 : 0;
 			std::list<CHAT>::iterator it = chatList_.begin();
@@ -711,23 +869,23 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 			for (; it != chatList_.end(); ++it) {
 				if (it->line != INT_MAX && c.position == it->position && c.alignFactor == it->alignFactor) {
 					if (c.bInsertLast) {
-						// ÅŒã‚É’Ç‰Á‚³‚ê‚½ƒRƒƒ“ƒg‚ğ’T‚·
+						// æœ€å¾Œã«è¿½åŠ ã•ã‚ŒãŸã‚³ãƒ¡ãƒ³ãƒˆã‚’æ¢ã™
 						if (itLast == chatList_.end() || DWORD_MSB(itLast->count - it->count)) {
 							itLast = it;
 						}
 					} else if (c.position == CHAT_POS_SHITA) {
-						// ‰º‚É‚ ‚éƒRƒƒ“ƒg‚Ù‚ÇƒŠƒXƒg‘O•û‚É‘}“ü‚³‚ê‚Ä‚¢‚é
+						// ä¸‹ã«ã‚ã‚‹ã‚³ãƒ¡ãƒ³ãƒˆã»ã©ãƒªã‚¹ãƒˆå‰æ–¹ã«æŒ¿å…¥ã•ã‚Œã¦ã„ã‚‹
 						if (c.line > it->line) {
 							break;
 						} else if (c.line == it->line) {
-							// c‚ª•\¦ŠJn‚·‚é“_‚Å*it‚ªÁ‚¦‚Ä‚¢‚ê‚Îd‚È‚ç‚È‚¢
+							// cãŒè¡¨ç¤ºé–‹å§‹ã™ã‚‹æ™‚ç‚¹ã§*itãŒæ¶ˆãˆã¦ã„ã‚Œã°é‡ãªã‚‰ãªã„
 							if (DWORD_DIFF(c.pts, it->pts) > displayDuration_) {
 								break;
 							}
 							c.line--;
 						}
 					} else if (c.position == CHAT_POS_UE) {
-						// ã‚É‚ ‚éƒRƒƒ“ƒg‚Ù‚ÇƒŠƒXƒg‘O•û‚É‘}“ü‚³‚ê‚Ä‚¢‚é
+						// ä¸Šã«ã‚ã‚‹ã‚³ãƒ¡ãƒ³ãƒˆã»ã©ãƒªã‚¹ãƒˆå‰æ–¹ã«æŒ¿å…¥ã•ã‚Œã¦ã„ã‚‹
 						if (c.line < it->line) {
 							break;
 						} else if (c.line == it->line) {
@@ -737,14 +895,14 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 							c.line++;
 						}
 					} else {
-						// ã‚É‚ ‚éƒRƒƒ“ƒg‚Ù‚ÇƒŠƒXƒg‘O•û‚É‘}“ü‚³‚ê‚Ä‚¢‚é
-						// ‘O‚Ì‚É’Ç‚¢‚Â‚©‚È‚¯‚ê‚Î‚¨‚‹
+						// ä¸Šã«ã‚ã‚‹ã‚³ãƒ¡ãƒ³ãƒˆã»ã©ãƒªã‚¹ãƒˆå‰æ–¹ã«æŒ¿å…¥ã•ã‚Œã¦ã„ã‚‹
+						// å‰ã®ã«è¿½ã„ã¤ã‹ãªã‘ã‚Œã°ãŠï½‹
 						if (c.line < it->line) {
 							break;
 						} else if (c.line == it->line) {
-							// c‚ª•\¦ŠJn‚·‚é“_‚Å*it‚Ì‰E’[‚ªƒEƒBƒ“ƒhƒE“à‚É‚ ‚ê‚Îd‚È‚ç‚È‚¢
+							// cãŒè¡¨ç¤ºé–‹å§‹ã™ã‚‹æ™‚ç‚¹ã§*itã®å³ç«¯ãŒã‚¦ã‚£ãƒ³ãƒ‰ã‚¦å†…ã«ã‚ã‚Œã°é‡ãªã‚‰ãªã„
 							if (DWORD_DIFF(c.pts, it->pts) * (width + it->currentDrawWidth) / displayDuration_ - it->currentDrawWidth > 0) {
-								// *it‚ª•\¦ŠúŒÀ‚ğŒ}‚¦‚é“_‚Åc‚Ì¶’[‚ªƒEƒBƒ“ƒhƒE“à‚É‚ ‚ê‚Î’Ç‚¢‚Â‚©‚È‚¢
+								// *itãŒè¡¨ç¤ºæœŸé™ã‚’è¿ãˆã‚‹æ™‚ç‚¹ã§cã®å·¦ç«¯ãŒã‚¦ã‚£ãƒ³ãƒ‰ã‚¦å†…ã«ã‚ã‚Œã°è¿½ã„ã¤ã‹ãªã„
 								if (width - DWORD_DIFF(it->pts + displayDuration_, c.pts) * (width + c.currentDrawWidth) / displayDuration_ > 0) {
 									break;
 								}
@@ -757,7 +915,7 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 			if (itLast != chatList_.end()) {
 				if (c.position == CHAT_POS_SHITA) {
 					if (itLast->line > 0) {
-						// itLast‚Ì’¼‘O‚É‘}“ü‚·‚é
+						// itLastã®ç›´å‰ã«æŒ¿å…¥ã™ã‚‹
 						c.line = itLast->line - 1;
 					}
 				} else {
@@ -765,12 +923,12 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 						c.line = itLast->line + 1;
 					}
 				}
-				// ‘}“üˆÊ’u‚ğÄŒŸõ
+				// æŒ¿å…¥ä½ç½®ã‚’å†æ¤œç´¢
 				for (it = chatList_.begin(); it != chatList_.end(); ++it) {
 					if (it->line != INT_MAX && c.position == it->position && c.alignFactor == it->alignFactor &&
 					    (c.position == CHAT_POS_SHITA && c.line >= it->line || c.position == CHAT_POS_UE && c.line <= it->line))
 					{
-						// d‚È‚éƒRƒƒ“ƒg‚Ì•\¦ŠúŒÀ‚ğk‚ß‚é
+						// é‡ãªã‚‹ã‚³ãƒ¡ãƒ³ãƒˆã®è¡¨ç¤ºæœŸé™ã‚’ç¸®ã‚ã‚‹
 						if (c.line == it->line && DWORD_DIFF(c.pts, it->pts) <= displayDuration_) {
 							it->pts = c.pts - displayDuration_;
 						}
@@ -778,14 +936,14 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 					}
 				}
 			}
-			chatList_.insert(it, c);
+			chatList_.splice(it, chatPoolList_, chatPoolList_.begin());
 		}
 
 		// End CBlockLock
 		}
 
 		if (currentWindowWidth_ != width) {
-			// ƒEƒBƒ“ƒhƒEƒTƒCƒY‚ª•Ï‚í‚Á‚½‚Ì‚ÅƒeƒNƒXƒ`ƒƒ‚Ì”jŠü‚ÆƒRƒƒ“ƒg‚Ì•`‰æƒTƒCƒY‚ÌÄŒv‘ª‚ğ‚·‚é
+			// ã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ã‚µã‚¤ã‚ºãŒå¤‰ã‚ã£ãŸã®ã§ãƒ†ã‚¯ã‚¹ãƒãƒ£ã®ç ´æ£„ã¨ã‚³ãƒ¡ãƒ³ãƒˆã®æç”»ã‚µã‚¤ã‚ºã®å†è¨ˆæ¸¬ã‚’ã™ã‚‹
 			currentWindowWidth_ = -1;
 			textureList_.clear();
 		}
@@ -795,42 +953,44 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 
 		Gdiplus::REAL shadowOffset = (Gdiplus::REAL)(fontScale_ * height / actLineCount / 15);
 		if (fontOutline_) {
-			// ‰æ‚è•\¦‚Í300%‚ğŠî€‚Éİ’è‚É‰‚¶‚Ä‘Œ¸
+			// ç¸å–ã‚Šè¡¨ç¤ºæ™‚ã¯300%ã‚’åŸºæº–ã«è¨­å®šã«å¿œã˜ã¦å¢—æ¸›
 			shadowOffset = shadowOffset * fontOutline_ / 150;
 		}
 		if (!bAntiAlias_) {
-			// ¬”“_ˆÈ‰º‚Ì‚¸‚ê‚Í•`‰æŒ‹‰Ê‚ª‰˜‚¢‚½‚ßlÌŒÜ“ü
+			// å°æ•°ç‚¹ä»¥ä¸‹ã®ãšã‚Œã¯æç”»çµæœãŒæ±šã„ãŸã‚å››æ¨äº”å…¥
 			shadowOffset = (Gdiplus::REAL)max((int)(shadowOffset + 0.5), 1);
 		}
 		Gdiplus::GraphicsPath grPath;
 
-		std::list<CHAT>::iterator it = chatList_.begin();
-		for (; it != chatList_.end(); ++it) {
-			const Gdiplus::Font *pFont = it->bMultiLine ? &(it->bSmall ? fontMultiSmall : fontMulti) : &(it->bSmall ? fontSmall : font);
+		for (std::list<CHAT>::iterator it = chatList_.begin(); it != chatList_.end(); ++it) {
+			const Gdiplus::Font &selFont = it->bMultiLine ? (it->bSmall ? fontMultiSmall : fontMulti) : (it->bSmall ? fontSmall : font);
+			const Gdiplus::Font &selFontEmoji = it->bMultiLine ? (it->bSmall ? fontMultiEmojiSmall : fontMultiEmoji) : (it->bSmall ? fontEmojiSmall : fontEmoji);
+			Gdiplus::REAL selFontEm = it->bSmall ? fontEmSmall : fontEm;
+			const Gdiplus::FontFamily &selFontFamily = it->bMultiLine ? fontFamilyMulti : fontFamily;
+			const Gdiplus::FontFamily &selFontFamilyEmoji = it->bMultiLine ? fontFamilyMultiEmoji : fontFamilyEmoji;
 			if (currentWindowWidth_ < 0) {
-				// ÀÛ‚Ì•`‰æƒTƒCƒY‚ğŒv‘ª
+				// å®Ÿéš›ã®æç”»ã‚µã‚¤ã‚ºã‚’è¨ˆæ¸¬
 				Gdiplus::RectF rcDraw;
-				if (g.MeasureString(it->text, -1, pFont, Gdiplus::PointF(0, 0), &rcDraw) == Gdiplus::Ok) {
+				if (MeasureString(g, it->text, selFont, selFontEmoji, selFontEm, Gdiplus::PointF(0, 0), &rcDraw)) {
 					it->currentDrawWidth = (int)rcDraw.Width;
 					it->currentDrawHeight = (int)rcDraw.Height;
 				}
 			}
-			// ‚Ü‚¾•\¦ƒ^ƒCƒ~ƒ“ƒO‚É’B‚µ‚È‚¢ƒRƒƒ“ƒg‚Í–³‹
+			// ã¾ã è¡¨ç¤ºã‚¿ã‚¤ãƒŸãƒ³ã‚°ã«é”ã—ãªã„ã‚³ãƒ¡ãƒ³ãƒˆã¯ç„¡è¦–
 			if (DWORD_MSB(rts_ - it->pts)) {
 				continue;
 			}
-			// ƒEƒBƒ“ƒhƒE‰º‚É‚Í‚İo‚·ƒRƒƒ“ƒg‚Í•\¦ƒ‰ƒCƒ“sŠÔ‚ÉˆÚ‚·
-			// ‚»‚ê‚Å‚à‚Í‚İo‚·ƒRƒƒ“ƒg‚Í–³‹
-			double actLine = it->line >= actLineCount ? ((double)it->line - actLineCount) + 0.5 : it->line;
+			// ã‚¦ã‚£ãƒ³ãƒ‰ã‚¦ä¸‹ã«ã¯ã¿å‡ºã™ã‚³ãƒ¡ãƒ³ãƒˆã¯è¡¨ç¤ºãƒ©ã‚¤ãƒ³è¡Œé–“ã«ç§»ã™
+			// ãã‚Œã§ã‚‚ã¯ã¿å‡ºã™ã‚³ãƒ¡ãƒ³ãƒˆã¯ç„¡è¦–
+			double actLine = it->line >= actLineCount ? (it->line - actLineCount) + 0.5 : it->line;
 			if (actLine < 0 || actLineCount <= actLine || lineDrawCount_ <= actLine) {
 				continue;
 			}
-			Gdiplus::FontFamily fontFamily;
-			pFont->GetFamily(&fontFamily);
-			Gdiplus::Color foreColor(it->color | Gdiplus::Color::AlphaMask);
+			Gdiplus::ARGB color = Gdiplus::Color::MakeARGB(it->colorA, it->colorR, it->colorG, it->colorB);
+			Gdiplus::Color foreColor(color | Gdiplus::Color::AlphaMask);
 			Gdiplus::Color shadowColor(3*foreColor.GetR() + 6*foreColor.GetG() + foreColor.GetB() < 255 ? Gdiplus::Color::White : Gdiplus::Color::Black);
-			Gdiplus::Color backColor1(Gdiplus::Color(it->color).GetA(), shadowColor.GetR(), shadowColor.GetG(), shadowColor.GetB());
-			Gdiplus::Color backColor2(bAntiAlias_ ? it->color : backColor1.GetValue());
+			Gdiplus::Color backColor1(Gdiplus::Color(color).GetA(), shadowColor.GetR(), shadowColor.GetG(), shadowColor.GetB());
+			Gdiplus::Color backColor2(bAntiAlias_ ? color : backColor1.GetValue());
 			bool bOpaque = backColor1.GetA() != 0;
 			int entireDrawWith = it->currentDrawWidth + (int)shadowOffset + 3;
 			int entireDrawHeight = it->currentDrawHeight + (int)shadowOffset + 3;
@@ -838,9 +998,9 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 			std::list<TEXTURE>::iterator jt = textureList_.end();
 			if (bUseTexture_) {
 				bool bCreateTexture = true;
-				// •`‰æ‚‚³‚ªƒeƒNƒXƒ`ƒƒ‚ÌÅ‘å‚‚³‚É”[‚Ü‚ç‚È‚¢‚È‚çƒeƒNƒXƒ`ƒƒ‚ğ‚·‚×‚Äì‚è’¼‚·
+				// æç”»é«˜ã•ãŒãƒ†ã‚¯ã‚¹ãƒãƒ£ã®æœ€å¤§é«˜ã•ã«ç´ã¾ã‚‰ãªã„ãªã‚‰ãƒ†ã‚¯ã‚¹ãƒãƒ£ã‚’ã™ã¹ã¦ä½œã‚Šç›´ã™
 				if (textureList_.empty() || entireDrawHeight > currentTextureHeight_) {
-					// •¡”sƒRƒƒ“ƒg‚ÍƒeƒNƒXƒ`ƒƒ‚ğì‚ç‚È‚¢
+					// è¤‡æ•°è¡Œã‚³ãƒ¡ãƒ³ãƒˆã¯ãƒ†ã‚¯ã‚¹ãƒãƒ£ã‚’ä½œã‚‰ãªã„
 					if (it->bMultiLine) {
 						bCreateTexture = false;
 					} else {
@@ -848,7 +1008,7 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 						textureList_.clear();
 					}
 				}
-				// ƒeƒNƒXƒ`ƒƒ‚ğ’T‚·
+				// ãƒ†ã‚¯ã‚¹ãƒãƒ£ã‚’æ¢ã™
 				jt = textureList_.begin();
 				std::list<TEXTURE>::const_iterator jtMin, kt;
 				POINT minPos = {0, 0};
@@ -860,11 +1020,11 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 				}
 				while (jt != textureList_.end() && !jt->IsMatch(*it)) {
 					kt = jt++;
-					// ƒeƒNƒXƒ`ƒƒ‚ğì‚éê‡‚É‚à‚Á‚Æ‚à“K“–‚ÈŒ„ŠÔ‚ğ’T‚·(ƒxƒXƒgƒtƒBƒbƒg)
+					// ãƒ†ã‚¯ã‚¹ãƒãƒ£ã‚’ä½œã‚‹å ´åˆã«ã‚‚ã£ã¨ã‚‚é©å½“ãªéš™é–“ã‚’æ¢ã™(ãƒ™ã‚¹ãƒˆãƒ•ã‚£ãƒƒãƒˆ)
 					if (jt != textureList_.end() && jt->rc.top == kt->rc.top) {
 						gapWidth = jt->rc.left - kt->rc.right;
 					} else {
-						// Ÿs‚ÉŒ×‚é‚Æ‚«‚ÍŸs‚Ìæ“ª‚àƒ`ƒFƒbƒN
+						// æ¬¡è¡Œã«è·¨ã‚‹ã¨ãã¯æ¬¡è¡Œã®å…ˆé ­ã‚‚ãƒã‚§ãƒƒã‚¯
 						gapWidth = (jt != textureList_.end() && jt->rc.top == kt->rc.top + currentTextureHeight_) ? jt->rc.left : textureWidth;
 						if (entireDrawWith <= gapWidth && gapWidth < minWidth && kt->rc.top + currentTextureHeight_ * 2 <= height) {
 							minWidth = gapWidth;
@@ -882,12 +1042,15 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 					}
 				}
 				if (jt == textureList_.end() && minWidth != INT_MAX && bCreateTexture) {
-					// ƒeƒNƒXƒ`ƒƒ‚ªŒ©‚Â‚©‚ç‚È‚©‚Á‚½‚Ì‚Åì‚é
+					// ãƒ†ã‚¯ã‚¹ãƒãƒ£ãŒè¦‹ã¤ã‹ã‚‰ãªã‹ã£ãŸã®ã§ä½œã‚‹
 					TEXTURE t;
 					SetRect(&t.rc, minPos.x, minPos.y, minPos.x + entireDrawWith, minPos.y + entireDrawHeight);
-					t.color = it->color;
+					t.colorB = it->colorB;
+					t.colorG = it->colorG;
+					t.colorR = it->colorR;
+					t.colorA = it->colorA;
 					t.bSmall = it->bSmall;
-					lstrcpy(t.text, it->text);
+					t.text = it->text;
 					pgTexture_->SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
 					pgTexture_->SetSmoothingMode(Gdiplus::SmoothingModeNone);
 					if (bOpaque) {
@@ -902,8 +1065,11 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 					Gdiplus::PointF pt((Gdiplus::REAL)t.rc.left, (Gdiplus::REAL)t.rc.top);
 					if (fontOutline_) {
 						grPath.Reset();
-						grPath.AddString(t.text, -1, &fontFamily, pFont->GetStyle(), pFont->GetSize() / 0.76f,
-						                 pt + Gdiplus::PointF(shadowOffset / 2 + 1, shadowOffset / 2 + 1), NULL);
+						MeasureString(g, t.text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(shadowOffset / 2 + 1, shadowOffset / 2 + 1), nullptr,
+						              [fontStyle, selFontEm, &grPath, &selFont, &selFontFamily, &selFontFamilyEmoji](
+						                  LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
+						                  grPath.AddString(text, len, &font == &selFont ? &selFontFamily : &selFontFamilyEmoji, fontStyle, selFontEm, origin, nullptr);
+						              });
 						pgTexture_->SetCompositingMode(bOpaque ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
 						pgTexture_->SetSmoothingMode(bAntiAlias_ ? Gdiplus::SmoothingModeHighQuality : Gdiplus::SmoothingModeNone);
 						Gdiplus::Pen penShadow(shadowColor, shadowOffset / 2);
@@ -912,19 +1078,23 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 						pgTexture_->SetCompositingMode(bAntiAlias_ ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
 						pgTexture_->FillPath(&br, &grPath);
 					} else {
-						// TODO: Win8‚ÉƒoƒOfix‚ª‚«‚½‚ç‚±‚Ì‚Ö‚ñ‚ğC³‚·‚é‚×‚«
-						// SourceCopy‚Ì•û‚ªŒy‚¢•µˆÍ‹C‚ª‚·‚é‚¯‚ÇWin8‚¾‚Æ•¶š•ö‰ó‚·‚é‚Ì‚Å“Á•Êˆµ‚¢
-						pgTexture_->SetCompositingMode(bOpaque || !bAntiAlias_ && bWindows8_ ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
+						pgTexture_->SetCompositingMode(bOpaque ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
 						Gdiplus::SolidBrush brShadow(shadowColor);
-						// Win7‚É‚¨‚¢‚ÄU+2588‚Ìã’[1ƒsƒNƒZƒ‹‚Í‚İo‚·Œ»Û‚ª‚İ‚ç‚ê‚½‚½‚ß+1
-						pgTexture_->DrawString(t.text, -1, pFont, pt + Gdiplus::PointF(shadowOffset, shadowOffset + 1), &brShadow);
-						pgTexture_->SetCompositingMode(bAntiAlias_ || bWindows8_ ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
-						pgTexture_->DrawString(t.text, -1, pFont, pt + Gdiplus::PointF(0, 1), &br);
+						// Win7ã«ãŠã„ã¦U+2588ã®ä¸Šç«¯1ãƒ”ã‚¯ã‚»ãƒ«ã¯ã¿å‡ºã™ç¾è±¡ãŒã¿ã‚‰ã‚ŒãŸãŸã‚+1
+						MeasureString(g, t.text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(shadowOffset, shadowOffset + 1), nullptr,
+						              [this, &brShadow](LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
+						                  pgTexture_->DrawString(text, len, &font, origin, &brShadow);
+						              });
+						pgTexture_->SetCompositingMode(bAntiAlias_ ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
+						MeasureString(g, t.text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(0, 1), nullptr,
+						              [this, &br](LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
+						                  pgTexture_->DrawString(text, len, &font, origin, &br);
+						              });
 					}
-					jt = textureList_.insert(jtMin, t);
+					jt = textureList_.insert(jtMin, std::move(t));
 				}
 			}
-			int px, py = (int)((0.5 + actLine) * height / actLineCount - (pFont->GetHeight(96) + shadowOffset) / 2);
+			int px, py = (int)((0.5 + actLine) * height / actLineCount - (selFont.GetHeight(96) + shadowOffset) / 2);
 			if (it->position == CHAT_POS_DEFAULT) {
 				px = width - (int)(rts_ - it->pts) * (width + it->currentDrawWidth) / displayDuration_;
 			} else {
@@ -933,7 +1103,7 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 			g.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
 			g.SetSmoothingMode(Gdiplus::SmoothingModeNone);
 			if (jt != textureList_.end()) {
-				// ƒeƒNƒXƒ`ƒƒ‚ğg‚¤
+				// ãƒ†ã‚¯ã‚¹ãƒãƒ£ã‚’ä½¿ã†
 				g.DrawImage(pTextureBitmap_, px, py,
 				            jt->rc.left, jt->rc.top, jt->rc.right - jt->rc.left, jt->rc.bottom - jt->rc.top, Gdiplus::UnitPixel);
 				jt->bUsed = true;
@@ -947,8 +1117,11 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 				Gdiplus::PointF pt((Gdiplus::REAL)px, (Gdiplus::REAL)py);
 				if (fontOutline_) {
 					grPath.Reset();
-					grPath.AddString(it->text, -1, &fontFamily, pFont->GetStyle(), pFont->GetSize() / 0.76f,
-					                 pt + Gdiplus::PointF(shadowOffset / 2 + 1, shadowOffset / 2 + 1), NULL);
+					MeasureString(g, it->text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(shadowOffset / 2 + 1, shadowOffset / 2 + 1), nullptr,
+					              [fontStyle, selFontEm, &grPath, &selFont, &selFontFamily, &selFontFamilyEmoji](
+					                  LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
+					                  grPath.AddString(text, len, &font == &selFont ? &selFontFamily : &selFontFamilyEmoji, fontStyle, selFontEm, origin, nullptr);
+					              });
 					g.SetCompositingMode(bAntiAlias_ ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
 					g.SetSmoothingMode(bAntiAlias_ ? Gdiplus::SmoothingModeHighQuality : Gdiplus::SmoothingModeNone);
 					Gdiplus::Pen penShadow(shadowColor, shadowOffset / 2);
@@ -956,16 +1129,22 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 					g.DrawPath(&penShadow, &grPath);
 					g.FillPath(&br, &grPath);
 				} else {
-					g.SetCompositingMode(bAntiAlias_ || bWindows8_ ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
+					g.SetCompositingMode(bAntiAlias_ ? Gdiplus::CompositingModeSourceOver : Gdiplus::CompositingModeSourceCopy);
 					Gdiplus::SolidBrush brShadow(shadowColor);
-					g.DrawString(it->text, -1, pFont, pt + Gdiplus::PointF(shadowOffset, shadowOffset + 1), &brShadow);
-					g.DrawString(it->text, -1, pFont, pt + Gdiplus::PointF(0, 1), &br);
+					MeasureString(g, it->text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(shadowOffset, shadowOffset + 1), nullptr,
+					              [&g, &brShadow](LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
+					                  g.DrawString(text, len, &font, origin, &brShadow);
+					              });
+					MeasureString(g, it->text, selFont, selFontEmoji, selFontEm, pt + Gdiplus::PointF(0, 1), nullptr,
+					              [&g, &br](LPCTSTR text, int len, const Gdiplus::Font &font, const Gdiplus::PointF &origin) {
+					                  g.DrawString(text, len, &font, origin, &br);
+					              });
 				}
 			}
 
-			// •`‰æ‚µ‚½•”•ª‚ğ–¢g—p‹éŒ`‚©‚çˆø‚­
-			int top = py;
-			int bottom = top + entireDrawHeight;
+			// æç”»ã—ãŸéƒ¨åˆ†ã‚’æœªä½¿ç”¨çŸ©å½¢ã‹ã‚‰å¼•ã
+			LONG top = py;
+			LONG bottom = top + entireDrawHeight;
 			if (bottom - prcUnused->top < prcUnused->bottom - top) {
 				prcUnused->top = min(max(bottom, prcUnused->top), prcUnused->bottom);
 			} else {
@@ -979,7 +1158,7 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 				}
 			}
 
-			// ‰‚ß‚Ä•`‰æ‚µ‚½‰ºƒRƒ‚ª‚ ‚éê‡
+			// åˆã‚ã¦æç”»ã—ãŸä¸‹ã‚³ãƒ¡ãŒã‚ã‚‹å ´åˆ
 			if (it->position == CHAT_POS_SHITA && !it->bDrew) {
 				*pbHasFirstDrawShita = true;
 			}
@@ -987,18 +1166,17 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 		}
 		currentWindowWidth_ = width;
 
-		// g‚í‚ê‚È‚©‚Á‚½ƒeƒNƒXƒ`ƒƒ‚ğÁ‚·
-		std::list<TEXTURE>::iterator jt = textureList_.begin();
-		while (jt != textureList_.end()) {
-			if (!jt->bUsed) {
-				jt = textureList_.erase(jt);
+		// ä½¿ã‚ã‚Œãªã‹ã£ãŸãƒ†ã‚¯ã‚¹ãƒãƒ£ã‚’æ¶ˆã™
+		for (std::list<TEXTURE>::iterator it = textureList_.begin(); it != textureList_.end(); ) {
+			if (!it->bUsed) {
+				it = textureList_.erase(it);
 			} else {
-				(jt++)->bUsed = false;
+				(it++)->bUsed = false;
 			}
 		}
 
 		if (debugFlags_ & 2 && bUseTexture_) {
-			// Debug:ƒeƒNƒXƒ`ƒƒ—pƒrƒbƒgƒ}ƒbƒv‚ğ•\¦
+			// Debug:ãƒ†ã‚¯ã‚¹ãƒãƒ£ç”¨ãƒ“ãƒƒãƒˆãƒãƒƒãƒ—ã‚’è¡¨ç¤º
 			if (debugFlags_ & 4) {
 				Gdiplus::SolidBrush br(Gdiplus::Color(2, 255, 0, 255));
 				pgTexture_->SetCompositingMode(Gdiplus::CompositingModeSourceOver);
@@ -1006,11 +1184,11 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 			}
 			g.SetCompositingMode(Gdiplus::CompositingModeSourceCopy);
 			g.DrawImage(pTextureBitmap_, 0, 0, textureWidth / 4, height / 4);
-			prcUnused->top = min(max(height / 4, prcUnused->top), prcUnused->bottom);
-			prcUnusedWoShita->top = min(max(height / 4, prcUnusedWoShita->top), prcUnusedWoShita->bottom);
+			prcUnused->top = min(max(static_cast<LONG>(height / 4), prcUnused->top), prcUnused->bottom);
+			prcUnusedWoShita->top = min(max(static_cast<LONG>(height / 4), prcUnusedWoShita->top), prcUnusedWoShita->bottom);
 		}
 		if (debugFlags_ & 1) {
-			// Debug:ƒtƒŒ[ƒ€ƒŒ[ƒg‚ğ•\¦
+			// Debug:ãƒ•ãƒ¬ãƒ¼ãƒ ãƒ¬ãƒ¼ãƒˆã‚’è¡¨ç¤º
 			static DWORD s_lastTick, s_count, s_fps;
 			DWORD tick = timeGetTime();
 			++s_count;
@@ -1020,7 +1198,7 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 				s_count = 0;
 			}
 			TCHAR text[64];
-			wsprintf(text, TEXT("%dfps %2dobj(%dopm)"), s_fps, (int)chatList_.size(), (int)chatList_.size() * 60000 / displayDuration_);
+			_stprintf_s(text, TEXT("%dfps %2dobj(%dopm)"), s_fps, (int)chatList_.size(), (int)chatList_.size() * 60000 / displayDuration_);
 			Gdiplus::SolidBrush br(s_count % 2 ? Gdiplus::Color::Lime : Gdiplus::Color::Black);
 			g.SetCompositingMode(Gdiplus::CompositingModeSourceOver);
 			g.DrawString(text, -1, &font, s_count % 2 ? Gdiplus::PointF(0, 0) : Gdiplus::PointF(2, 2), &br);
@@ -1030,29 +1208,28 @@ void CCommentWindow::DrawChat(Gdiplus::Graphics &g, int width, int height, RECT 
 
 LRESULT CALLBACK CCommentWindow::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam)
 {
-	static const int TIMER_AUTOHIDE = 1;
 	CCommentWindow *pThis;
 	switch (uMsg) {
 	case WM_CREATE:
 		pThis = static_cast<CCommentWindow*>((reinterpret_cast<LPCREATESTRUCT>(lParam))->lpCreateParams);
 		SetWindowLongPtr(hwnd, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(pThis));
 		pThis->hwnd_ = hwnd;
-		SetTimer(hwnd, TIMER_AUTOHIDE, 1000, NULL);
+		SetTimer(hwnd, 1, 1000, nullptr);
 		return 0;
 	case WM_DESTROY:
-		// ƒgƒbƒvƒŒƒxƒ‹‚¶‚á‚È‚¢‚Ì‚ÅDestroy()ˆÈŠO‚©‚ç‘¼”­“I‚É”jŠü‚³‚ê‚é‚±‚Æ‚à‚ ‚é
+		// ãƒˆãƒƒãƒ—ãƒ¬ãƒ™ãƒ«ã˜ã‚ƒãªã„ã®ã§Destroy()ä»¥å¤–ã‹ã‚‰ä»–ç™ºçš„ã«ç ´æ£„ã•ã‚Œã‚‹ã“ã¨ã‚‚ã‚ã‚‹
 		pThis = reinterpret_cast<CCommentWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
-		pThis->hwnd_ = NULL;
+		pThis->hwnd_ = nullptr;
 		return 0;
 	case WM_TIMER:
-		if (wParam == TIMER_AUTOHIDE) {
+		if (wParam == 1) {
 			pThis = reinterpret_cast<CCommentWindow*>(GetWindowLongPtr(hwnd, GWLP_USERDATA));
 			bool bEmpty;
 			{
-				CBlockLock lock(&pThis->chatLock_);
+				lock_recursive_mutex lock(pThis->chatLock_);
 				bEmpty = pThis->chatList_.empty() && pThis->chatPoolList_.empty();
 			}
-			// •\¦‚·‚é•¨‚ª‚È‚¢‚Ì‚ÉƒEƒBƒ“ƒhƒE(‚Ü‚½‚ÍOSD)‚ª•\¦ó‘Ô‚©‚Ç‚¤‚©
+			// è¡¨ç¤ºã™ã‚‹ç‰©ãŒãªã„ã®ã«ã‚¦ã‚£ãƒ³ãƒ‰ã‚¦(ã¾ãŸã¯OSD)ãŒè¡¨ç¤ºçŠ¶æ…‹ã‹ã©ã†ã‹
 			if (bEmpty && (pThis->bUseOsd_ && pThis->bShowOsd_ || !pThis->bUseOsd_ && IsWindowVisible(hwnd))) {
 				if (++pThis->autoHideCount_ >= AUTOHIDE_DELAY) {
 					if (pThis->bUseOsd_) {
@@ -1066,9 +1243,77 @@ LRESULT CALLBACK CCommentWindow::WndProc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 			} else {
 				pThis->autoHideCount_ = 0;
 			}
+			// OnParentMove()/OnParentSize()ãŒé©åˆ‡ãªã‚¿ã‚¤ãƒŸãƒ³ã‚°ã§å‘¼ã°ã‚Œã‚‹ã®ãŒç†æƒ³ã ãŒã€æœ€ä½é™ã®ãƒãƒ¼ãƒªãƒ³ã‚°ã‚‚ã™ã‚‹
+			if (pThis->IsParentSized()) {
+				if (++pThis->parentSizedCount_ >= 2) {
+					pThis->OnParentSize();
+				}
+			} else {
+				pThis->parentSizedCount_ = 0;
+			}
 			return 0;
 		}
 		break;
 	}
 	return DefWindowProc(hwnd, uMsg, wParam, lParam);
+}
+
+namespace
+{
+const int EMOJI_RANGE_TABLE[] =
+{
+	// Wikipediaã€ŒUnicodeã®Emojiã®ä¸€è¦§ã€ã®ã†ã¡2021å¹´æ™‚ç‚¹ã®MS Gothicã«å«ã¾ã‚Œãªã„ã‚‚ã®
+	0x2139, 0x2140,
+	0x231A, 0x231C,
+	0x2328, 0x2329,
+	0x23CF, 0x23D0,
+	0x23E9, 0x23F4,
+	0x23F8, 0x23FB,
+	0x25FB, 0x25FF,
+	0x2614, 0x2616,
+	0x2618, 0x2619,
+	0x267B, 0x267C,
+	0x267E, 0x2680,
+	0x2692, 0x2698,
+	0x2699, 0x269A,
+	0x269B, 0x269D,
+	0x26A0, 0x26A2,
+	0x26AA, 0x26AC,
+	0x26B0, 0x26B2,
+	0x26BD, 0x26BF,
+	0x26C4, 0x26C6,
+	0x26C8, 0x26C9,
+	0x26CE, 0x26D0,
+	0x26D1, 0x26D2,
+	0x26D3, 0x26D5,
+	0x26E9, 0x26EB,
+	0x26F0, 0x26F6,
+	0x26F7, 0x26FB,
+	0x26FD, 0x26FE,
+	0x2705, 0x2706,
+	0x270A, 0x270C,
+	0x2728, 0x2729,
+	0x274C, 0x274D,
+	0x274E, 0x274F,
+	0x2753, 0x2756,
+	0x2757, 0x2758,
+	0x2795, 0x2798,
+	0x27B0, 0x27B1,
+	0x27BF, 0x27C0,
+	0x2B05, 0x2B08,
+	0x2B1B, 0x2B1D,
+	0x2B50, 0x2B51,
+	0x2B55, 0x2B56,
+	// ç•°ä½“å­—ã‚»ãƒ¬ã‚¯ã‚¿
+	0xFE0E, 0xFE10,
+	0x1F004, 0x1F005,
+	0x1F0CF, 0x1F0D0,
+	0x1F170, 0x1F172,
+	0x1F17E, 0x1F180,
+	0x1F18E, 0x1F18F,
+	0x1F191, 0x1F19B,
+	0x1F1E6, 0x1F200,
+	// ã€Œãã®ä»–ã®è¨˜å·åŠã³çµµè¨˜å·ã€-ã€Œæ‹¡å¼µã•ã‚ŒãŸè¨˜å·ã¨çµµæ–‡å­—-Aã€
+	0x1F300, 0x1FB00,
+};
 }

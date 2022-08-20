@@ -6,39 +6,54 @@
 ■なにこれ？
 ニコニコ実況を表示するTVTest用のプラグインです。
 
-# このプラグインはニコニコ実況サーバ(jk.nicovideo.jp)と通信します。サーバに高負
-# 荷を与えるような利用や改変をしないでください。
+# このプラグインはjkcnsl( https://github.com/xtne6f/jkcnsl )アプリを介してニコニ
+# コのテレビ実況サーバ(live2.nicovideo.jp)と非公式に通信します。サーバに高負荷を
+# 与えるような利用や改変をしないでください。
 
 
 ■使い方
-NicoJK.tvtpおよびNicoJK.iniをTVTestのPluginフォルダに入れてください。
+NicoJK.tvtpおよびNicoJK.iniをTVTestのPluginフォルダに入れてください。jkcnsl.exe
+はTVTest.exeのあるフォルダに入れてください。
 
 ログファイルへの記録機能は、NicoJK.iniのlogfileModeを1か2にして、Pluginsフォルダ
 の中に"NicoJK"というフォルダを作っておくと有効になります。ログは"NicoJK"フォルダ
 に保存されていきます。録画中に受信した実況コメントがファイル再生プラグイン(何で
 もいい)で再生中に表示されればOKです。
 
-些末なことですが勢い窓のフォントは「Meiryo UI」なので、XPやVista環境では入れてお
-く(PowerPointViewerとかについてくる)とちょっとだけいい感じです。
-Vista以降のAero環境で性能に余裕があればNicoJK.iniのtimerIntervalを-10000にすると
-描画がスムーズになります。
+同梱のjkimlog.exeは外部のログファイルを"NicoJK"フォルダに取り込むコマンドライン
+ツールです。使用する場合はjkimlog.exeを"NicoJK"フォルダの直下に置いてください。
+ログファイル(.jklか.xmlか.txtで、ファイル名のどこかに"jk{番号}"を含むこと)のパス
+を引数に与えて使います。すでに存在するログと重複するときは、重複する範囲のログが
+トリムされてから取り込まれます。ログファイルをjkimlog.exeにD&Dするだけで使えます
+が、以下のような内容の.batファイルをショートカット代わりにすると便利です:
+> @echo off
+> "Path\to\TVTest\Plugins\NicoJK\jkimlog.exe" %1
+> if %errorlevel% equ 0 del %1
+> pause
 
 ■設定
 NicoJK.iniを確認してください。
 
 ■コメント投稿について
 コメント投稿機能を有効にする場合は以下の作業を行ってください:
+※DTV板の有志により、ブラウザに依存しないログインツールなども提供されています。
 1."sqlite3.exe"を用意
-  http://www.sqlite.org/download.html の「Precompiled Binaries for Windows」から
-  "sqlite-shell-win32-x86-{数字}.zip"をダウンロードして、中身の"sqlite3.exe"を
+  https://sqlite.org/download.html の「Precompiled Binaries for Windows」から
+  "sqlite-tools-win32-x86-{数字}.zip"をダウンロードして、中身の"sqlite3.exe"を
   TVTest.exeのある場所かパスの通った場所(C:\windows あたりがオススメ)に配置
+2.必要なら"jq.exe"を用意
+  https://stedolan.github.io/jq/ から"jq-win32.exe"か"jq-win64.exe"をダウンロー
+  ドして、"jq.exe"にリネームして上記と同様に配置
 2.ブラウザでニコニコ実況にログイン
-  FirefoxまたはGoogleChromeで http://jk.nicovideo.jp/ にアクセスして各自のアカウ
-  ントでログイン
+  FirefoxやEdgeやGoogleChromeで https://jk.nicovideo.jp にアクセスして各自のアカ
+  ウントでログイン
 3.NicoJK.iniのexecGetCookieにブラウザのプロファイルフォルダを設定
   プロファイルフォルダの場所については「firefox cookies.sqlite」や「chrome
   cookie 保存場所」などのキーワードでググって見つけてください。正しく設定すれば
   プラグイン有効時にこのコマンドが実行され、勢い窓にコメント投稿欄が現れます
+4.必要ならexecGetV10Keyにもブラウザのプロファイルフォルダを設定
+  最近のEdgeやGoogleChromeのクッキー情報はブラウザのマスターキーで保護されている
+  ため、この設定も必要です
 
 コメント投稿欄の仕様は以下のとおりです:
 ・Enterキー押下で投稿
@@ -47,7 +62,7 @@ NicoJK.iniを確認してください。
 ・投稿欄が空のとき、Ctrl+Vで複数行のペーストができる
 ・TabまたはRS(レコードセパレータ)文字は改行文字と解釈する
   ・RSは右クリ→「Unicode制御文字の挿入」で入力可能。IMEに辞書登録すると便利
-・最長75文字。最短投稿間隔は3秒
+・最長75文字。最短投稿間隔は2秒
 
 専用のアカウントを使う場合は、ログイン用のユーザプロファイルをブラウザに作成する
 と便利です。Firefoxの手順:
@@ -59,19 +74,26 @@ NicoJK.iniを確認してください。
   トカットから起動したときに"sub"プロファイルが使われる
 
 ■制限
-今のところbigコマンドは解釈しません。
+現状、「勢い」情報の取得方法がまとまっていません。差し当たりchannelsUri設定を追
+加しましたが、情報提供者の負担などを考えるとこれが最良なのか迷います。
+今のところbigコマンドは解釈しません。投稿コマンドは実況サーバによる制限を受ける
+場合があります。
+パネルのNicoJKタブのテーマ/配色は"操作パネル"の設定に連動します。
 
 ■テスト環境
 Win7 sp1 + PT2/PT3 + ptTimer + BonDriver_ptmr.dll + TVTest 0.7.19(x86)
+※このフォークのテスト環境はWindows10 TVTest 0.10.0-dev(x64)
 
 ■配布
 http://www.rutice.net/
 古いやつは↓
 https://github.com/rutice/NicoJK/downloads
 リンクする場合は、配布ページか、ソースコードのページへお願いします。
+※このフォークの配布ページは https://github.com/xtne6f/NicoJK/releases
 
 ■ソースコード
 https://github.com/rutice/NicoJK
+※このフォークのソースコードは https://github.com/xt4ubq/NicoJK
 
 ■ログの仕様(開発者むけ)
 ルートフォルダに"jk{実況番号}"というフォルダ(jkフォルダ)を作成する。jkフォルダに
@@ -79,6 +101,16 @@ https://github.com/rutice/NicoJK
 作成する。ログファイル追記中は"lockfile"というファイルをjkフォルダに排他モードで
 開いておく。ルートフォルダには(jkフォルダと被らなければ)任意のフォルダやファイル
 を置くことができるが、jkフォルダにはログ以外の.txtファイルは置くべきでない。
+
+1つ以上のログファイルをzip形式でアーカイブすることができる。アーカイブの名前は
+"{10桁のunix時間(=アーカイブしたログファイル名の中で最小のもの)}.zip"とし、jkフ
+ォルダ内に複数置くことができる。複数のアーカイブどうしのログは時間的に重ならない
+ようにする(重なっている部分は時間的に後方のアーカイブしか検索しないため)。アーカ
+イブにはログ以外の.txtファイルは格納すべきでない。また、jkフォルダにはこれ以外の
+.zipファイルは置くべきでない。
+アーカイブされていないログとアーカイブされたログとは時間的に重なっていても構わな
+い(NicoJKはまずアーカイブされていないものからログを検索し、次にアーカイブを検索
+する)。
 
 ログファイルは実況サーバから取得したUTF-8のchatタグを改行CRLFで羅列したもの。
 chatタグの要素に改行を含むときはLF=&#10;、CR=&#13;の数値文字参照に置きかえる。
@@ -88,6 +120,7 @@ chatタグの左右に空白その他の文字を加えてはいけない(BOMも
 
 ■感謝
 過去ログ再生機能、コメント機能を実装していただいたxtne6f氏に感謝いたします。
+N/実/勢アイコンは「ふい字」( https://hp.vector.co.jp/authors/VA039499/ )です。
 
 ■更新履歴
 ChangeLog.txtを参照

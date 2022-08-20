@@ -1,9 +1,18 @@
 ﻿#include "stdafx.h"
 #include "Util.h"
+#include "unzip.h"
+#include "iowin32.h"
+#include <commdlg.h>
+#include <wincrypt.h>
+#pragma comment(lib, "crypt32.lib")
+#ifndef NO_USE_CNG
+#include <bcrypt.h>
+#pragma comment(lib, "bcrypt.lib")
+#endif
 
 static const struct {
 	COLORREF color;
-	char *command;
+	const char *command;
 } COMMAND2COLOR[] = {
 	{RGB(0xFF, 0x00, 0x00), "red"},
 	{RGB(0xFF, 0x80, 0x80), "pink"},
@@ -34,58 +43,73 @@ static const struct {
 };
 
 // 必要なバッファを確保してGetPrivateProfileSection()を呼ぶ
-TCHAR *NewGetPrivateProfileSection(LPCTSTR lpAppName, LPCTSTR lpFileName)
+std::vector<TCHAR> GetPrivateProfileSectionBuffer(LPCTSTR lpAppName, LPCTSTR lpFileName)
 {
-	TCHAR *pBuf = NULL;
-	for (int bufSize = 4096; bufSize < 1024 * 1024; bufSize *= 2) {
-		delete [] pBuf;
-		pBuf = new TCHAR[bufSize];
-		if ((int)GetPrivateProfileSection(lpAppName, pBuf, bufSize, lpFileName) < bufSize - 2) {
+	std::vector<TCHAR> buf(4096);
+	for (;;) {
+		DWORD len = GetPrivateProfileSection(lpAppName, buf.data(), static_cast<DWORD>(buf.size()), lpFileName);
+		if (len < buf.size() - 2) {
+			buf.resize(len + 1);
 			break;
 		}
-		pBuf[0] = 0;
+		buf.resize(buf.size() * 2);
 	}
-	return pBuf;
+	return buf;
 }
 
 // GetPrivateProfileSection()で取得したバッファから、キーに対応する文字列を取得する
 void GetBufferedProfileString(LPCTSTR lpBuff, LPCTSTR lpKeyName, LPCTSTR lpDefault, LPTSTR lpReturnedString, DWORD nSize)
 {
-	int nKeyLen = lstrlen(lpKeyName);
-	if (nKeyLen <= 126) {
-		TCHAR szKey[128];
-		lstrcpy(szKey, lpKeyName);
-		lstrcpy(szKey + (nKeyLen++), TEXT("="));
-		while (*lpBuff) {
-			int nLen = lstrlen(lpBuff);
-			if (!StrCmpNI(lpBuff, szKey, nKeyLen)) {
-				if ((lpBuff[nKeyLen] == TEXT('\'') || lpBuff[nKeyLen] == TEXT('"')) &&
-				    nLen >= nKeyLen + 2 && lpBuff[nKeyLen] == lpBuff[nLen - 1]) {
-					lstrcpyn(lpReturnedString, lpBuff + nKeyLen + 1, min(nLen-nKeyLen-1, static_cast<int>(nSize)));
-				} else {
-					lstrcpyn(lpReturnedString, lpBuff + nKeyLen, nSize);
-				}
-				return;
+	size_t nKeyLen = _tcslen(lpKeyName);
+	while (*lpBuff) {
+		size_t nLen = _tcslen(lpBuff);
+		if (!_tcsnicmp(lpBuff, lpKeyName, nKeyLen) && lpBuff[nKeyLen] == TEXT('=')) {
+			if ((lpBuff[nKeyLen + 1] == TEXT('\'') || lpBuff[nKeyLen + 1] == TEXT('"')) &&
+			    nLen >= nKeyLen + 3 && lpBuff[nKeyLen + 1] == lpBuff[nLen - 1]) {
+				_tcsncpy_s(lpReturnedString, nSize, lpBuff + nKeyLen + 2, min(nLen - nKeyLen - 3, static_cast<size_t>(nSize - 1)));
+			} else {
+				_tcsncpy_s(lpReturnedString, nSize, lpBuff + nKeyLen + 1, _TRUNCATE);
 			}
-			lpBuff += nLen + 1;
+			return;
 		}
+		lpBuff += nLen + 1;
 	}
-	lstrcpyn(lpReturnedString, lpDefault, nSize);
+	_tcsncpy_s(lpReturnedString, nSize, lpDefault, _TRUNCATE);
+}
+
+// GetPrivateProfileSection()で取得したバッファから、キーに対応する文字列をtstringで取得する
+tstring GetBufferedProfileToString(LPCTSTR lpBuff, LPCTSTR lpKeyName, LPCTSTR lpDefault)
+{
+	size_t nKeyLen = _tcslen(lpKeyName);
+	while (*lpBuff) {
+		size_t nLen = _tcslen(lpBuff);
+		if (!_tcsnicmp(lpBuff, lpKeyName, nKeyLen) && lpBuff[nKeyLen] == TEXT('=')) {
+			if ((lpBuff[nKeyLen + 1] == TEXT('\'') || lpBuff[nKeyLen + 1] == TEXT('"')) &&
+			    nLen >= nKeyLen + 3 && lpBuff[nKeyLen + 1] == lpBuff[nLen - 1]) {
+				return tstring(lpBuff + nKeyLen + 2, nLen - nKeyLen - 3);
+			} else {
+				return tstring(lpBuff + nKeyLen + 1, nLen - nKeyLen - 1);
+			}
+		}
+		lpBuff += nLen + 1;
+	}
+	return lpDefault;
 }
 
 // GetPrivateProfileSection()で取得したバッファから、キーに対応する数値を取得する
 int GetBufferedProfileInt(LPCTSTR lpBuff, LPCTSTR lpKeyName, int nDefault)
 {
-	TCHAR sz[24];
+	TCHAR sz[16];
 	GetBufferedProfileString(lpBuff, lpKeyName, TEXT(""), sz, _countof(sz));
-	int nRet;
-	return StrToIntEx(sz, STIF_DEFAULT, &nRet) ? nRet : nDefault;
+	LPTSTR endp;
+	int nRet = _tcstol(sz, &endp, 10);
+	return endp == sz ? nDefault : nRet;
 }
 
 BOOL WritePrivateProfileInt(LPCTSTR lpAppName, LPCTSTR lpKeyName, int value, LPCTSTR lpFileName)
 {
-	TCHAR sz[24];
-	wsprintf(sz, TEXT("%d"), value);
+	TCHAR sz[16];
+	_stprintf_s(sz, TEXT("%d"), value);
 	return WritePrivateProfileString(lpAppName, lpKeyName, sz, lpFileName);
 }
 
@@ -98,24 +122,6 @@ DWORD GetLongModuleFileName(HMODULE hModule, LPTSTR lpFileName, DWORD nSize)
 		if (nRet < nSize) return nRet;
 	}
 	return 0;
-}
-
-// HTTPヘッダフィールドを連結付加する
-void AppendHttpHeader(char *str, const char *field, const char *value, const char *trail)
-{
-	// valueが空文字列なら何もしない
-	if (value[0]) {
-		int n = lstrlenA(str);
-		lstrcatA(&str[n], field);
-		lstrcatA(&str[n], value);
-		lstrcatA(&str[n], trail);
-	}
-}
-
-size_t FindHttpBody(const char *str)
-{
-	const char *p = strstr(str, "\r\n\r\n");
-	return p ? p + 4 - str : strlen(str);
 }
 
 bool HasToken(const char *str, const char *substr)
@@ -150,8 +156,8 @@ void DecodeEntityReference(TCHAR *str)
 	for (; *str; ++p) {
 		if ((*p = *str++) == TEXT('&')) {
 			for (int i = 0; i < _countof(ENT_REF); ++i) {
-				int len = lstrlen(ENT_REF[i].ref);
-				if (!StrCmpN(str, ENT_REF[i].ref, len)) {
+				size_t len = _tcslen(ENT_REF[i].ref);
+				if (!_tcsncmp(str, ENT_REF[i].ref, len)) {
 					str += len;
 					*p = ENT_REF[i].ent;
 					break;
@@ -162,26 +168,12 @@ void DecodeEntityReference(TCHAR *str)
 	*p = TEXT('\0');
 }
 
-void EncodeEntityReference(const char *src, char *dest, int destSize)
-{
-	// 切り捨てを防ぐには'&'に対して5倍のバッファを見積もる
-	dest[0] = '\0';
-	for (; *src; ++src) {
-		char s[2] = {*src};
-		const char *p = *s=='<' ? "&lt;" : *s=='>' ? "&gt;" : *s=='&' ? "&amp;" : s;
-		if (lstrlenA(dest) + lstrlenA(p) >= destSize) {
-			break;
-		}
-		lstrcatA(dest, p);
-	}
-}
-
 COLORREF GetColor(const char *command)
 {
 	static const std::regex re("(?:^| )#([0-9A-Fa-f]{6})(?: |$)");
 	std::cmatch m;
 	if (std::regex_search(command, m, re)) {
-		int color = strtol(m[1].first, NULL, 16);
+		int color = strtol(m[1].first, nullptr, 16);
 		return RGB((color>>16)&0xFF, (color>>8)&0xFF, color&0xFF);
 	}
 	for (int i = 0; i < _countof(COMMAND2COLOR); ++i) {
@@ -195,97 +187,46 @@ COLORREF GetColor(const char *command)
 bool GetChatDate(unsigned int *tm, const char *tag)
 {
 	// TODO: dateは秒精度しかないので独自に属性値つけるかvposを解釈するとよりよいかも
-	static const std::regex re("^<chat[^>]*? date=\"(\\d+)\"");
+	static const std::regex re("^<chat(?= )[^>]*? date=\"(\\d+)\"");
 	std::cmatch m;
 	if (std::regex_search(tag, m, re)) {
-		*tm = strtoul(m[1].first, NULL, 10);
+		*tm = strtoul(m[1].first, nullptr, 10);
 		return true;
 	}
 	return false;
 }
 
-void UnixTimeToFileTime(unsigned int tm, FILETIME *pft)
+LONGLONG UnixTimeToFileTime(unsigned int tm)
 {
-	LONGLONG ll = static_cast<LONGLONG>(tm) * 10000000 + 116444736000000000;
-	pft->dwLowDateTime = static_cast<DWORD>(ll);
-	pft->dwHighDateTime = static_cast<DWORD>(ll >> 32);
+	return tm * 10000000LL + 116444736000000000;
 }
 
-unsigned int FileTimeToUnixTime(const FILETIME &ft)
+unsigned int FileTimeToUnixTime(LONGLONG ll)
 {
-	LONGLONG ll = (static_cast<LONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
 	return static_cast<unsigned int>((ll - 116444736000000000) / 10000000);
 }
 
-FILETIME &operator+=(FILETIME &ft, LONGLONG offset)
-{
-	LONGLONG ll = (static_cast<LONGLONG>(ft.dwHighDateTime) << 32) | ft.dwLowDateTime;
-	ll += offset;
-	ft.dwLowDateTime = static_cast<DWORD>(ll);
-	ft.dwHighDateTime = static_cast<DWORD>(ll >> 32);
-	return ft;
-}
-
-LONGLONG operator-(const FILETIME &ft1, const FILETIME &ft2)
-{
-	LONGLONG ll1 = (static_cast<LONGLONG>(ft1.dwHighDateTime) << 32) | ft1.dwLowDateTime;
-	LONGLONG ll2 = (static_cast<LONGLONG>(ft2.dwHighDateTime) << 32) | ft2.dwLowDateTime;
-	return ll1 - ll2;
-}
-
-// 参考: ARIB STD-B10,TR-B13
-static void SplitAribMjd(WORD wAribMjd, WORD *pwYear, WORD *pwMonth, WORD *pwDay, WORD *pwDayOfWeek)
-{
-	// MJD形式の日付を解析する
-	DWORD dwYd = ((DWORD)wAribMjd * 20 - 301564) / 7305;
-	DWORD dwMd = ((DWORD)wAribMjd * 10000 - 149561000 - dwYd * 1461 / 4 * 10000) / 306001;
-	DWORD dwK = dwMd==14 || dwMd==15 ? 1 : 0;
-	*pwDay = wAribMjd - 14956 - (WORD)(dwYd * 1461 / 4) - (WORD)(dwMd * 306001 / 10000);
-	*pwYear = (WORD)(dwYd + dwK) + 1900;
-	*pwMonth = (WORD)(dwMd - 1 - dwK * 12);
-	*pwDayOfWeek = (wAribMjd + 3) % 7;
-}
-
-bool AribToSystemTime(const BYTE *pData, SYSTEMTIME *pst)
+LONGLONG AribToFileTime(const BYTE *pData)
 {
 	if (pData[0]==0xFF && pData[1]==0xFF && pData[2]==0xFF && pData[3]==0xFF && pData[4]==0xFF) {
 		// 不指定
-		return false;
+		return -1;
 	}
-	SplitAribMjd((pData[0]<<8)|pData[1], &pst->wYear, &pst->wMonth, &pst->wDay, &pst->wDayOfWeek);
-	pst->wHour = (pData[2]>>4) * 10 + (pData[2]&0x0F);
-	pst->wMinute = (pData[3]>>4) * 10 + (pData[3]&0x0F);
-	pst->wSecond = (pData[4]>>4) * 10 + (pData[4]&0x0F);
-	pst->wMilliseconds = 0;
-	return true;
-}
-
-// FindFirstFile()の結果をstd::vectorで返す
-void GetFindFileList(LPCTSTR pattern, std::vector<WIN32_FIND_DATA> *pList, std::vector<LPWIN32_FIND_DATA> *pSortedList)
-{
-	pList->clear();
-	WIN32_FIND_DATA findData;
-	HANDLE hFind = FindFirstFile(pattern, &findData);
-	if (hFind != INVALID_HANDLE_VALUE) {
-		do {
-			pList->push_back(findData);
-		} while (FindNextFile(hFind, &findData));
-		FindClose(hFind);
-	}
-	if (pSortedList) {
-		pSortedList->clear();
-		std::vector<WIN32_FIND_DATA>::iterator it = pList->begin();
-		for (; it != pList->end(); ++it) {
-			pSortedList->push_back(&(*it));
-		}
-		std::sort(pSortedList->begin(), pSortedList->end(), LPWIN32_FIND_DATA_COMPARE());
-	}
+	// 1858-11-17
+	LONGLONG llft = 81377568000000000;
+	// MJD形式の日付
+	llft += (pData[0] << 8 | pData[1]) * FILETIME_MILLISECOND * 86400000;
+	// BCD形式の時刻
+	llft += ((pData[2] >> 4) * 10 + (pData[2] & 0x0F)) * FILETIME_MILLISECOND * 3600000;
+	llft += ((pData[3] >> 4) * 10 + (pData[3] & 0x0F)) * FILETIME_MILLISECOND * 60000;
+	llft += ((pData[4] >> 4) * 10 + (pData[4] & 0x0F)) * FILETIME_MILLISECOND * 1000;
+	return llft;
 }
 
 // ファイルを開くダイアログ
 BOOL FileOpenDialog(HWND hwndOwner, LPCTSTR lpstrFilter, LPTSTR lpstrFile, DWORD nMaxFile)
 {
-	OPENFILENAME ofn = {0};
+	OPENFILENAME ofn = {};
 	ofn.lStructSize = sizeof(OPENFILENAME);
 	ofn.hwndOwner = hwndOwner;
 	ofn.lpstrFilter = lpstrFilter;
@@ -297,197 +238,104 @@ BOOL FileOpenDialog(HWND hwndOwner, LPCTSTR lpstrFilter, LPTSTR lpstrFile, DWORD
 	return GetOpenFileName(&ofn);
 }
 
-// ローカル形式をタイムシフトする
-static bool TxtToLocalFormat(LPCTSTR srcPath, LPCTSTR destPath, unsigned int tmNew)
+// tmToRead以前でもっとも新しいログファイルをアーカイブから探す
+const char *FindZippedLogfile(FIND_LOGFILE_CACHE &cache, bool &bSameResult, LPCTSTR zipPath, unsigned int tmToRead)
 {
-	FILE *fpDest = NULL;
-	FILE *fpSrc;
-	if (!lstrcmpi(PathFindExtension(srcPath), TEXT(".txt")) && !_tfopen_s(&fpSrc, srcPath, TEXT("r"))) {
-		const std::regex re("^<chat[^>]*? date=\"(\\d+)\"");
-		std::cmatch m;
-		char buf[4096];
-		unsigned int tmOld = 0;
-		while (fgets(buf, _countof(buf), fpSrc)) {
-			if (std::regex_search(buf, m, re)) {
-				// chatタグが1行以上見つかれば書き込みを始める
-				if (!fpDest && _tfopen_s(&fpDest, destPath, TEXT("w"))) {
-					fpDest = NULL;
-					break;
-				}
-				fwrite(buf, sizeof(char), m[1].first - buf, fpDest);
-				unsigned int tm = strtoul(m[1].first, NULL, 10);
-				if (!tmOld) {
-					tmOld = tm;
-				}
-				fprintf(fpDest, "%u", !tmNew ? tm : tm - tmOld + tmNew);
-				fputs(m[1].second, fpDest);
-			}
-		}
-		fclose(fpSrc);
-	}
-	if (fpDest) {
-		fclose(fpDest);
-	}
-	return fpDest != NULL;
-}
-
-static void WriteChatTag(FILE *fpDest, const std::cmatch &m, unsigned int *ptmOld, unsigned int tmNew)
-{
-	fwrite(m[0].first, sizeof(char), m[1].first - m[0].first, fpDest);
-	unsigned int tm = strtoul(m[1].first, NULL, 10);
-	if (!*ptmOld) {
-		*ptmOld = tm;
-	}
-	fprintf(fpDest, "%u", !tmNew ? tm : tm - *ptmOld + tmNew);
-	const char *p = m[1].second;
-	int len = 0;
-	for (; p + len < m[0].second; ++len) {
-		// 改行文字は数値文字参照に置換
-		if (p[len] == '\n' || p[len] == '\r') {
-			fwrite(p, sizeof(char), len, fpDest);
-			fprintf(fpDest, "&#%d;", p[len]);
-			p += len + 1;
-			len = -1;
-		}
-	}
-	fwrite(p, sizeof(char), len, fpDest);
-	fputs("\n", fpDest);
-}
-
-// JikkyoRec.jklをローカル形式に変換する
-static bool JklToLocalFormat(LPCTSTR srcPath, LPCTSTR destPath, unsigned int tmNew)
-{
-	FILE *fpDest = NULL;
-	FILE *fpSrc;
-	if (!lstrcmpi(PathFindExtension(srcPath), TEXT(".jkl")) && !_tfopen_s(&fpSrc, srcPath, TEXT("rb"))) {
-		char buf[4096];
-		if (fread(buf, sizeof(char), 10, fpSrc) != 10 || memcmp(buf, "<JikkyoRec", 10) || _tfopen_s(&fpDest, destPath, TEXT("w"))) {
-			fpDest = NULL;
-		} else {
-			// 空行まで読み飛ばす
-			int c;
-			for (int d = '\0'; (c = fgetc(fpSrc)) != EOF && !(d=='\n' && (c=='\n' || c=='\r')); d = c);
-
-			const std::regex re("<chat[^>]*? date=\"(\\d+)\"[^]*?</chat>");
-			std::cmatch m;
-			int bufLen = 0;
-			unsigned int tmOld = 0;
-			while ((c = fgetc(fpSrc)) != EOF) {
-				if (bufLen >= _countof(buf)) {
-					bufLen = 0;
-					continue;
-				}
-				buf[bufLen++] = static_cast<char>(c);
-				if (c == '\0') {
-					if (std::regex_search(buf, m, re)) {
-						WriteChatTag(fpDest, m, &tmOld, tmNew);
+	// アーカイブ内ファイルの列挙は比較的重いのでキャッシュする
+	if (_tcsicmp(zipPath, cache.path.c_str())) {
+		cache.path = zipPath;
+		cache.list.clear();
+		zlib_filefunc64_def def;
+		fill_win32_filefunc64(&def);
+		unzFile f = unzOpen2_64(zipPath, &def);
+		if (f) {
+			if (unzGoToFirstFile(f) == UNZ_OK) {
+				do {
+					char name[16] = {};
+					if (unzGetCurrentFileInfo64(f, nullptr, name, 15, nullptr, 0, nullptr, 0) == UNZ_OK &&
+					    strlen(name) == 14 &&
+					    !strchr(name, '/') &&
+					    !unzStringFileNameCompare(name + 10, ".txt", 0)) {
+						cache.list.resize(cache.list.size() + 1);
+						strcpy_s(cache.list.back().name, name);
 					}
-					bufLen = 0;
-				}
+				} while (unzGoToNextFile(f) == UNZ_OK);
 			}
+			unzClose(f);
 		}
-		fclose(fpSrc);
+		cache.index = cache.list.size();
 	}
-	if (fpDest) {
-		fclose(fpDest);
-	}
-	return fpDest != NULL;
-}
 
-// ニコニコ実況コメントビューア.xmlをローカル形式に変換する
-static bool XmlToLocalFormat(LPCTSTR srcPath, LPCTSTR destPath, unsigned int tmNew)
-{
-	FILE *fpDest = NULL;
-	FILE *fpSrc;
-	if (!lstrcmpi(PathFindExtension(srcPath), TEXT(".xml")) && !_tfopen_s(&fpSrc, srcPath, TEXT("r"))) {
-		char buf[4096];
-		if (!fgets(buf, _countof(buf), fpSrc) || !strstr(buf, "<?xml") || _tfopen_s(&fpDest, destPath, TEXT("w"))) {
-			fpDest = NULL;
-		} else {
-			const std::regex re("<chat[^>]*? date=\"(\\d+)\"[^]*?</chat>");
-			std::cmatch m;
-			char tag[8192];
-			tag[0] = '\0';
-			unsigned int tmOld = 0;
-			while (fgets(buf, _countof(buf), fpSrc)) {
-				if (lstrlenA(buf) >= static_cast<int>(_countof(tag)) - lstrlenA(tag)) {
-					tag[0] = '\0';
-					continue;
-				}
-				lstrcatA(tag, buf);
-				if (std::regex_search(tag, m, re)) {
-					WriteChatTag(fpDest, m, &tmOld, tmNew);
-					tag[0] = '\0';
-				}
-			}
+	// tmToRead以前でもっとも新しいログファイルを探す
+	char target[16];
+	sprintf_s(target, "%010u.", tmToRead);
+	const char *name = nullptr;
+	size_t lastIndex = cache.index;
+	cache.index = cache.list.size();
+	for (size_t i = 0; i < cache.list.size(); ++i) {
+		if (strcmp(cache.list[i].name, target) < 0 &&
+		    (!name || strcmp(cache.list[i].name, name) > 0)) {
+			name = cache.list[i].name;
+			cache.index = i;
 		}
-		fclose(fpSrc);
 	}
-	if (fpDest) {
-		fclose(fpDest);
-	}
-	return fpDest != NULL;
-}
-
-bool ImportLogfile(LPCTSTR srcPath, LPCTSTR destPath, unsigned int tmNew)
-{
-	return JklToLocalFormat(srcPath, destPath, tmNew) ||
-	       XmlToLocalFormat(srcPath, destPath, tmNew) ||
-	       TxtToLocalFormat(srcPath, destPath, tmNew);
+	bSameResult = name && cache.index == lastIndex;
+	return name;
 }
 
 // 指定プロセスを実行して標準出力の文字列を得る
-bool GetProcessOutput(LPTSTR commandLine, LPCTSTR currentDir, char *buf, int bufSize, int timeout)
+bool GetProcessOutput(LPCTSTR commandLine, LPCTSTR currentDir, char *buf, size_t bufSize, int timeout)
 {
 	bool bRet = false;
 	SECURITY_ATTRIBUTES sa;
 	sa.nLength = sizeof(sa);
-	sa.lpSecurityDescriptor = NULL;
+	sa.lpSecurityDescriptor = nullptr;
 	sa.bInheritHandle = TRUE;
 	HANDLE hReadPipe, hWritePipe;
 	if (CreatePipe(&hReadPipe, &hWritePipe, &sa, 0)) {
-		TCHAR lastDir[MAX_PATH];
-		DWORD dwRet;
-		if (!currentDir || (dwRet = GetCurrentDirectory(MAX_PATH, lastDir)) < MAX_PATH && dwRet && SetCurrentDirectory(currentDir)) {
-			STARTUPINFO si = {0};
-			si.cb = sizeof(si);
-			si.dwFlags = STARTF_USESTDHANDLES;
-			si.hStdOutput = hWritePipe;
-			PROCESS_INFORMATION pi;
-			if (CreateProcess(NULL, commandLine, NULL, NULL, TRUE, CREATE_NO_WINDOW, NULL, NULL, &si, &pi)) {
-				int bufCount = 0;
-				bool bBreak = false;
-				bRet = true;
-				while (!bBreak) {
-					timeout -= 100;
-					if (WaitForSingleObject(pi.hProcess, 100) == WAIT_OBJECT_0) {
-						bBreak = true;
-					} else if (timeout <= 0) {
+		STARTUPINFO si = {};
+		si.cb = sizeof(si);
+		si.dwFlags = STARTF_USESTDHANDLES;
+		si.hStdOutput = hWritePipe;
+		// 標準エラー出力は捨てる
+		si.hStdError = CreateFile(TEXT("nul"), GENERIC_WRITE, 0, &sa, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+		PROCESS_INFORMATION pi;
+		std::vector<TCHAR> commandLineBuf(commandLine, commandLine + _tcslen(commandLine) + 1);
+		if (CreateProcess(nullptr, commandLineBuf.data(), nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, currentDir, &si, &pi)) {
+			bRet = true;
+		}
+		if (si.hStdError != INVALID_HANDLE_VALUE) {
+			CloseHandle(si.hStdError);
+		}
+		CloseHandle(hWritePipe);
+		if (bRet) {
+			size_t bufCount = 0;
+			bool bBreak = false;
+			while (!bBreak) {
+				timeout -= 100;
+				if (WaitForSingleObject(pi.hProcess, 100) == WAIT_OBJECT_0) {
+					bBreak = true;
+				} else if (timeout <= 0) {
+					bBreak = true;
+					bRet = false;
+				}
+				DWORD avail;
+				if (PeekNamedPipe(hReadPipe, nullptr, 0, nullptr, &avail, nullptr) && avail != 0) {
+					if (bufCount + avail >= bufSize) {
 						bBreak = true;
 						bRet = false;
-					}
-					DWORD avail;
-					if (PeekNamedPipe(hReadPipe, NULL, 0, NULL, &avail, NULL) && avail != 0) {
-						if (bufCount + (int)avail >= bufSize) {
-							bBreak = true;
-							bRet = false;
-						} else {
-							DWORD read;
-							if (ReadFile(hReadPipe, &buf[bufCount], avail, &read, NULL)) {
-								bufCount += read;
-							}
+					} else {
+						DWORD read;
+						if (ReadFile(hReadPipe, &buf[bufCount], avail, &read, nullptr)) {
+							bufCount += read;
 						}
 					}
 				}
-				buf[bufCount] = '\0';
-				CloseHandle(pi.hThread);
-				CloseHandle(pi.hProcess);
 			}
-			if (currentDir) {
-				SetCurrentDirectory(lastDir);
-			}
+			buf[bufCount] = '\0';
+			CloseHandle(pi.hThread);
+			CloseHandle(pi.hProcess);
 		}
-		CloseHandle(hWritePipe);
 		CloseHandle(hReadPipe);
 	}
 	return bRet;
@@ -510,11 +358,144 @@ std::string UnprotectDpapiToString(const char *src)
 	DATA_BLOB in, out = {};
 	in.cbData = static_cast<DWORD>(blob.size());
 	in.pbData = blob.data();
-	if (!in.cbData || !CryptUnprotectData(&in, NULL, NULL, NULL, NULL, CRYPTPROTECT_UI_FORBIDDEN, &out) || !out.pbData) {
+	if (!in.cbData || !CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &out) || !out.pbData) {
 		return "";
 	}
 	std::string ret(reinterpret_cast<char*>(out.pbData), out.cbData);
 	SecureZeroMemory(out.pbData, out.cbData);
 	LocalFree(out.pbData);
 	return ret;
+}
+
+// v10(AES-GCM)でプロテクトされた文字列を復号する
+std::string UnprotectV10ToString(const char *src, const char *v10Key, char *buf, size_t bufSize)
+{
+	std::vector<BYTE> blob;
+	for (int i = 0;; ++i) {
+		char c = src[i];
+		if ('0' <= c && c <= '9') c -= '0';
+		else if ('A' <= c && c <= 'F') c -= 'A' - 10;
+		else if ('a' <= c && c <= 'f') c -= 'a' - 10;
+		else break;
+
+		if (i % 2) blob[i / 2] += c;
+		else blob.push_back(static_cast<BYTE>(c * 16));
+	}
+
+	// 鍵のBase64エンコードを解除
+	DATA_BLOB in;
+	in.cbData = static_cast<DWORD>(bufSize);
+	in.pbData = reinterpret_cast<BYTE*>(buf);
+	if (!CryptStringToBinaryA(v10Key, 0, CRYPT_STRING_BASE64, in.pbData, &in.cbData, nullptr, nullptr) ||
+	    in.cbData <= 5 ||
+	    memcmp(in.pbData, "DPAPI", 5)) {
+		return "";
+	}
+	// 鍵のDPAPIプロテクトを解除
+	in.cbData -= 5;
+	in.pbData += 5;
+	DATA_BLOB key = {};
+	if (!CryptUnprotectData(&in, nullptr, nullptr, nullptr, nullptr, CRYPTPROTECT_UI_FORBIDDEN, &key) || !key.pbData) {
+		return "";
+	}
+
+	std::string ret;
+#ifndef NO_USE_CNG
+	if (blob.size() > 12 + 16 && key.cbData == 32) {
+		// AES-GCMを復号
+		BCRYPT_ALG_HANDLE hAlgo;
+		if (BCRYPT_SUCCESS(BCryptOpenAlgorithmProvider(&hAlgo, BCRYPT_AES_ALGORITHM, nullptr, 0))) {
+			WCHAR chainMode[] = BCRYPT_CHAIN_MODE_GCM;
+			BCRYPT_KEY_HANDLE hKey;
+			if (BCRYPT_SUCCESS(BCryptSetProperty(hAlgo, BCRYPT_CHAINING_MODE, reinterpret_cast<UCHAR*>(chainMode), sizeof(chainMode), 0)) &&
+			    BCRYPT_SUCCESS(BCryptGenerateSymmetricKey(hAlgo, &hKey, nullptr, 0, key.pbData, key.cbData, 0))) {
+				BCRYPT_AUTHENTICATED_CIPHER_MODE_INFO info;
+				BCRYPT_INIT_AUTH_MODE_INFO(info);
+				// 入力の先頭12バイトはnonce
+				info.pbNonce = blob.data();
+				info.cbNonce = 12;
+				// 入力の末尾16バイトはタグ
+				info.pbTag = blob.data() + blob.size() - 16;
+				info.cbTag = 16;
+				ULONG resultLen;
+				if (BCRYPT_SUCCESS(BCryptDecrypt(hKey, blob.data() + 12, static_cast<ULONG>(blob.size() - 12 - 16), &info, nullptr, 0,
+				                   blob.data() + 12, static_cast<ULONG>(blob.size() - 12 - 16), &resultLen, 0))) {
+					blob[12 + resultLen] = 0;
+					ret = reinterpret_cast<char*>(blob.data() + 12);
+				}
+				SecureZeroMemory(blob.data(), blob.size());
+				BCryptDestroyKey(hKey);
+			}
+			BCryptCloseAlgorithmProvider(hAlgo, 0);
+		}
+	}
+#endif
+	SecureZeroMemory(key.pbData, key.cbData);
+	LocalFree(key.pbData);
+	return ret;
+}
+
+// コマンドを実行してCookieを得る
+std::string GetCookieString(LPCTSTR execGetCookie, LPCTSTR execGetV10Key, char *buf, size_t bufSize, int timeout)
+{
+	if (!_tcsicmp(execGetCookie, TEXT("cmd /c echo ;"))) {
+		return ";";
+	}
+	TCHAR currDir[MAX_PATH];
+	if (GetLongModuleFileName(nullptr, currDir, _countof(currDir))) {
+		for (size_t i = _tcslen(currDir); i > 0 && !_tcschr(TEXT("/\\"), currDir[i - 1]); ) {
+			currDir[--i] = TEXT('\0');
+		}
+		if (GetProcessOutput(execGetCookie, currDir, buf, bufSize, timeout)) {
+			std::string strBuf = buf + strspn(buf, " \t\n\r");
+			size_t pos = strBuf.find_last_not_of(" \t\n\r");
+			strBuf.erase(pos == std::string::npos ? 0 : pos + 1);
+			// 改行->';'
+			std::string ret, v10Key;
+			for (size_t i = 0; i < strBuf.size(); ) {
+				size_t endPos = strBuf.find_first_of("=\r\n", i);
+				if (endPos == std::string::npos || strBuf[endPos] != '=') {
+					// そのまま
+					ret.append(strBuf, i, endPos - i);
+				} else {
+					size_t valPos = endPos + 1;
+					endPos = strBuf.find_first_of("\r\n", valPos);
+					if (valPos + 1 < strBuf.size() && (strBuf[valPos] == 'X' || strBuf[valPos] == 'x') && strBuf[valPos + 1] == '\'') {
+						// BLOB
+						ret.append(strBuf, i, valPos - i);
+						if (!strBuf.compare(valPos + 2, 6, "763130")) {
+							// v10(AES-GCM)によるプロテクト
+							if (execGetV10Key[0]) {
+								if (v10Key.empty() && GetProcessOutput(execGetV10Key, currDir, buf, bufSize, timeout)) {
+									const char *p = buf + strspn(buf, " \t\n\r");
+									v10Key.assign(p, strcspn(p, " \t\n\r"));
+								}
+								if (v10Key.empty()) {
+									// 成否に関わらず1回だけ実行するため
+									v10Key = "!";
+								}
+								ret += UnprotectV10ToString(strBuf.c_str() + valPos + 8, v10Key.c_str(), buf, bufSize);
+							}
+						} else if (!strBuf.compare(valPos + 2, 8, "01000000")) {
+							// DPAPIによるプロテクト
+							ret += UnprotectDpapiToString(strBuf.c_str() + valPos + 2);
+						}
+					} else {
+						// そのまま
+						ret.append(strBuf, i, endPos - i);
+					}
+				}
+				ret += ';';
+				i = endPos;
+				if (i != std::string::npos) {
+					i = strBuf.find_first_of("\n", i);
+					if (i != std::string::npos) {
+						++i;
+					}
+				}
+			}
+			return ret;
+		}
+	}
+	return "";
 }

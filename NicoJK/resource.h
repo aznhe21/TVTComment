@@ -2,7 +2,11 @@
 #define IDC_STATIC (-1)
 #endif
 
-#define IDD_FORCE                               101
+#define IDB_ICON                                110
+#define IDB_FORCE                               112
+#define IDB_FORCE16                             113
+#define IDB_COMMENT                             114
+#define IDB_COMMENT16                           115
 #define IDC_RADIO_FORCE                         1000
 #define IDC_RADIO_LOG                           1001
 #define IDC_CHECK_SPECFILE                      1002
